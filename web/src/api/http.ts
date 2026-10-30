@@ -205,9 +205,9 @@ async function send<T>(method: Method, path: string, opts: RequestOptions, dange
 }
 
 /**
- * 二进制响应（备份导出）。
+ * 二进制响应（备份导出、审计 CSV）。
  *
- * 不能走 send：它会把响应体当 JSON 解析，而备份是密文，
+ * 不能走 send：它会把响应体当 JSON 解析，而备份是密文、审计是 CSV，
  * JSON.parse 失败后返回 undefined——用户会拿到一个「成功但没有内容」
  * 的结果，然后以为备份是空的。
  */
@@ -238,6 +238,13 @@ export const http = {
   /** 下载二进制。备份导出用 */
   postBlob: (path: string, body?: unknown, opts?: RequestOptions) =>
     retryWithDangerCode(code => sendBlob('POST', path, { ...opts, body }, code)),
+
+  /**
+   * 下载二进制（GET）。审计导出用。
+   *
+   * 不用复核验证码：导出是只读操作，后端不会走 danger 那一套。
+   */
+  getBlob: (path: string, opts?: RequestOptions) => sendBlob('GET', path, opts ?? {}),
 
   /** 上传表单。恢复备份用 */
   postForm: <T>(path: string, form: FormData, opts?: RequestOptions) =>

@@ -55,6 +55,8 @@ export interface DemoDeps {
   reservedIps: DemoReservedIp[]
   /** 写一条审计。与真实后端一样，写操作都要留痕。 */
   log: (action: string, target?: string, accountId?: string, detail?: string, result?: string) => void
+  /** 读全部审计流水（新的在前）。与 `GET /api/audit` 同一个数组，导出 CSV 用。 */
+  auditEntries: () => D.AuditEntryDTO[]
   fail: (status: number, code: string, message: string) => never
   uid: (prefix: string) => string
   iso: (ms: number) => string
@@ -195,6 +197,53 @@ export function groupsOf(accounts: DemoAccount[]): string[] {
     if (wx !== wy) return wy - wx
     return x.localeCompare(y)
   })
+}
+
+/* ---------- 审计 CSV 的转义（照抄 internal/httpapi/accounts.go） ---------- */
+
+const CSV_HEADER = ['时间', '动作', '账号', '目标资源', '详情', '来源 IP', '结果']
+
+/** 表格软件会把以这些字符开头的单元格当公式执行。 */
+const FORMULA_START = new Set(['=', '+', '-', '@', '\t', '\r'])
+
+/**
+ * 中和 CSV 公式注入。
+ *
+ * 审计里的 target 有一部分是外部可控的——登录失败的 Target 直接取自请求体里的
+ * 用户名，**未认证即可写入任意字符串**。攻击者留一行 `=cmd|'/c calc'!A0`，
+ * 管理员导出后用 Excel 打开就中招。加前导单引号是这类导出的通用做法：
+ * Excel / LibreOffice / WPS 都按文本处理，肉眼差别只是一个引号。
+ */
+function csvCell(v: string): string {
+  if (!v) return ''
+  return FORMULA_START.has(v[0]) ? `'${v}` : v
+}
+
+/**
+ * 与 Go 的 `csv.Writer` 同一套规则。
+ *
+ * 含分隔符、引号、换行**或以空白字符开头**都要加引号，内部引号翻倍——
+ * 最后那条容易漏（Go 的 `fieldNeedsQuotes` 结尾是 `unicode.IsSpace(r1)`），
+ * 漏了的话以空格开头的详情在 Excel 里会被吞掉前导空格。
+ * Go 还有一条「整格就是一个 `\.`」的特例，是给 Excel 的怪癖兜底，不复刻。
+ */
+function csvQuote(v: string): string {
+  if (!v) return ''
+  return /[",\n\r]/.test(v) || /^\s/.test(v) ? `"${v.replace(/"/g, '""')}"` : v
+}
+
+const csvRow = (cells: string[]): string => cells.map(v => csvQuote(csvCell(v))).join(',')
+
+/**
+ * 后端用 Go 的 `2006-01-02 15:04:05`，是**服务器本地时区**。
+ * 这里跟着用本地时区，别改成 toISOString——那样导出会比页面上的时间差 8 小时。
+ */
+function csvTime(iso: string): string {
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return ''
+  const p = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} `
+    + `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
 }
 
 /* ---------- 注册 ---------- */
@@ -1055,6 +1104,28 @@ export function registerLocalRoutes(d: DemoDeps): void {
     notice: '调用预算按小时计数。用量接近上限时，抢机与运维任务的间隔会自动放大，' +
       '界面上的「降频倍数」就是当前放大的比例。'
   }))
+
+  /* ================= 审计导出 ================= */
+
+  /**
+   * 上游漏了这条：`GET /api/audit` 有，导出没有。设置页的「导出 CSV」在演示站
+   * 点下去会落到 `demo_unsupported`，提示「下载部署后可用」——而这是演示站上
+   * 唯一一个不需要后端也能做得跟真的一样的事。
+   *
+   * 逐字段对齐 `handleExportAudit`：同样的列、同样的顺序、同样的 BOM 与转义。
+   */
+  on('GET', '/api/audit/export', (_, q) => {
+    let list = d.auditEntries()
+    if (q.accountId) list = list.filter(e => e.accountId === q.accountId)
+    if (q.action) list = list.filter(e => e.action === q.action)
+    const lines = [csvRow(CSV_HEADER)]
+    for (const e of list) {
+      lines.push(csvRow([csvTime(e.createdAt), e.action, e.accountId, e.target, e.detail, e.ip, e.result]))
+    }
+    // BOM 不能省：Excel 不认无 BOM 的 UTF-8，中文表头会显示成乱码。
+    // 行尾用 \n 而不是 \r\n——Go 的 csv.Writer 默认就是 \n。
+    return new Blob(['\uFEFF' + lines.join('\n') + '\n'], { type: 'text/csv; charset=utf-8' })
+  })
 
   /* ================= 运行日志 ================= */
 

@@ -31,6 +31,19 @@ const { registerLocalRoutes, demoLogStream } = await import(
 const NOW = Date.now()
 const iso = (ms) => new Date(ms).toISOString()
 const ago = (ms) => iso(NOW - ms)
+
+/**
+ * 本地时区的 `YYYY-MM-DD HH:MM:SS`，与 local.ts 的 csvTime 同口径。
+ *
+ * 这条断言只在 TZ 不是 UTC 时才有意义（本机 +08:00）：要是哪天有人把
+ * csvTime 改成 toISOString，导出时间就会比页面上的早 8 小时。
+ */
+const csvTimeLocal = (v) => {
+  const d = new Date(v)
+  const p = (n) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} `
+    + `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
+}
 const DAY = 86400000
 
 let seq = 0
@@ -42,6 +55,20 @@ const fail = (status, code, message) => {
   throw e
 }
 const log = () => {}
+
+/* 审计流水（新的在前）。导出 CSV 用，形状与 GET /api/audit 返回的一致。
+   第一条的 target 故意写成公式、第二条故意带逗号与引号、最后一条的 detail
+   以两个空格开头——这三件事 Go 的 csv.Writer 都会特殊处理，得逐一对上。 */
+const audit = [
+  { id: 4, userId: 'u-demo', action: 'login', accountId: '', target: "=cmd|'/c calc'!A0",
+    detail: '', ip: '127.0.0.1', result: 'ok', createdAt: ago(60000) },
+  { id: 3, userId: 'u-demo', action: 'account_create', accountId: 'acc-tok', target: '东京主号, 备用',
+    detail: '备注里有"引号"', ip: '127.0.0.1', result: 'ok', createdAt: ago(120000) },
+  { id: 2, userId: 'u-demo', action: 'account_create', accountId: 'acc-pho', target: '凤凰城试用',
+    detail: '', ip: '127.0.0.1', result: 'fail', createdAt: ago(180000) },
+  { id: 1, userId: 'u-demo', action: 'note_update', accountId: 'acc-tok', target: '缩进备注',
+    detail: '  两个空格开头', ip: '127.0.0.1', result: 'ok', createdAt: ago(240000) }
+]
 
 const accounts = [
   mkAccount('acc-tok', '东京主号', 'TOK', 'PAY_AS_YOU_GO', 'ap-tokyo-1'),
@@ -96,7 +123,10 @@ const on = (method, pattern, h) => {
   routes.sort((a, b) => a[2].length - b[2].length)
 }
 
-registerLocalRoutes({ on, accounts, instances, nets, reservedIps, log, fail, uid, iso, ago })
+registerLocalRoutes({
+  on, accounts, instances, nets, reservedIps, log, fail, uid, iso, ago,
+  auditEntries: () => audit
+})
 
 function call(method, path, query = {}, body = {}) {
   for (const [m, re, keys, h] of routes) {
@@ -274,6 +304,29 @@ const budget = call('GET', '/api/risk-budget')
 ok('预算已启用并带窗口', budget.enabled === true && !!budget.window)
 ok('每个账号一条', budget.accounts.length === accounts.length)
 ok('有降频的账号倍数为 4', budget.accounts.some(a => a.multiplier === 4))
+
+console.log('审计导出')
+const csvBlob = call('GET', '/api/audit/export')
+ok('导出返回 CSV Blob', csvBlob instanceof Blob && csvBlob.type.startsWith('text/csv'), csvBlob?.type)
+// 查原始字节而不是 blob.text()：TextDecoder 默认会把 BOM 吃掉，
+// 但 Excel 看的是文件里那几个字节，必须在。
+const head = new Uint8Array(await csvBlob.arrayBuffer()).subarray(0, 3)
+ok('开头带 BOM（Excel 不认无 BOM 的 UTF-8）', head[0] === 0xef && head[1] === 0xbb && head[2] === 0xbf, [...head])
+const csvRows = (await csvBlob.text()).trimEnd().split('\n')
+ok('表头与后端逐字一致', csvRows[0] === '时间,动作,账号,目标资源,详情,来源 IP,结果', csvRows[0])
+ok('每条审计一行', csvRows.length === audit.length + 1, csvRows.length)
+ok('时间格式是 YYYY-MM-DD HH:MM:SS', /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},/.test(csvRows[1]), csvRows[1])
+// 公式注入：target 来自请求体里的用户名，未认证即可写入，必须中和。
+ok('公式开头的单元格加了前导单引号', csvRows[1].split(',')[3] === "'=cmd|'/c calc'!A0", csvRows[1])
+ok('含逗号的字段被引号包住', csvRows[2].includes('"东京主号, 备用"'), csvRows[2])
+ok('字段内的引号翻倍', csvRows[2].includes('"备注里有""引号"""'), csvRows[2])
+// Go 的 fieldNeedsQuotes 结尾是 unicode.IsSpace(r1)：以空白开头也要加引号。
+ok('以空格开头的字段加引号', csvRows[4].includes('"  两个空格开头"'), csvRows[4])
+ok('时间按本地时区渲染，不是 UTC', csvRows[1].startsWith(csvTimeLocal(audit[0].createdAt)), csvRows[1])
+ok('按账号筛选生效', (await call('GET', '/api/audit/export', { accountId: 'acc-pho' }).text())
+  .trimEnd().split('\n').length === 2)
+ok('按动作筛选生效', (await call('GET', '/api/audit/export', { action: 'login' }).text())
+  .trimEnd().split('\n').length === 2)
 
 console.log(`\n全部通过：${checked} 项断言，${routes.length} 条路由`)
 

@@ -1156,9 +1156,12 @@ on('POST', '/api/proxies/{id}/check', p => ({ results: [checkProxy(proxies.find(
 /* 总览（前端目前不调用，保留以免 404） */
 on('GET', '/api/overview', () => unsupported('这个接口'))
 
-/* 本地增强版接口：账号组织、权限自检、计费风险、运维任务、CF、备份、预算。
+/* 本地增强版接口：账号组织、权限自检、计费风险、运维任务、CF、备份、预算、审计导出。
    实现在 ./local.ts，理由见那个文件开头——server.ts 是上游文件。 */
-registerLocalRoutes({ on, accounts, instances, nets, reservedIps, log, fail, uid, iso, ago })
+registerLocalRoutes({
+  on, accounts, instances, nets, reservedIps, log, fail, uid, iso, ago,
+  auditEntries: () => audit
+})
 
 /* ---------- 入口 ---------- */
 

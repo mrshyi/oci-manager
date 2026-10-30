@@ -238,13 +238,43 @@ function exportCsv() {
     toast({ tone: 'warning', title: '没有可导出的记录' })
     return
   }
-  // 同源、带 Cookie 的普通下载，交给浏览器处理。BOM 与转义都在后端做了。
-  // 演示站没有后端，导出不了文件。
+  // 演示站没有后端，导出交给浏览器里的模拟实现（见下面的 exportCsvDemo）。
+  // 之所以拆成两个函数而不是把 await 写在这里：那会让 exportCsv 变成 async，
+  // 正式产物里也会多出 async 标记——功能一模一样，却让入库的 dist 整片重建。
   if (import.meta.env.VITE_DEMO === 'true') {
-    toast({ tone: 'info', title: '演示站不支持导出', body: '部署自己的实例后即可导出完整的 CSV。' })
+    void exportCsvDemo()
     return
   }
+  // 同源、带 Cookie 的普通下载，交给浏览器处理。BOM 与转义都在后端做了。
+  // 这里刻意不用 fetch + Blob：全量导出可能有几十万行，直接跳转让浏览器
+  // 流式落盘，不必先在内存里攒出一整个文件。
   window.location.href = '/api/audit/export'
+}
+
+/**
+ * 演示站的导出。
+ *
+ * 模拟后端按真实后端的规则生成 CSV（同样的列、转义、BOM），这里只负责
+ * 走一遍浏览器的下载流程，让「点一下真的能拿到文件」这件事在演示站上也成立。
+ */
+async function exportCsvDemo() {
+  try {
+    const blob = await insights.exportAudit()
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    // 用本地日期，对齐后端的 `time.Now().Format("2006-01-02")`。
+    // 不能用 toISOString().slice(0,10)：那是 UTC，北京时间 08:00 之前会写成前一天。
+    const now = new Date()
+    const pad = (n: number) => String(n).padStart(2, '0')
+    a.download = `audit-${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}.csv`
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    URL.revokeObjectURL(url)
+  } catch (err) {
+    toastError('导出失败', err)
+  }
 }
 
 /* ---------- 关于 ---------- */

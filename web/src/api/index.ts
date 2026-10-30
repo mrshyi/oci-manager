@@ -503,6 +503,16 @@ export const insights = {
     http.get<{ entries: D.AuditEntryDTO[]; hasMore: boolean; total?: number }>(
       '/api/audit', { query: filter }),
 
+  /**
+   * 全量审计记录导出为 CSV。
+   *
+   * 走后端而不是把前端已加载的那一页拼成文件：分页之后手里只有最新一页，
+   * 而按钮上写的是「导出 CSV」——悄悄少掉大部分记录的导出比没有更糟。
+   * 转义、BOM、公式注入中和都在后端做（见 handleExportAudit）。
+   */
+  exportAudit: (filter: { accountId?: string; action?: string } = {}) =>
+    http.getBlob('/api/audit/export', { query: filter }),
+
   regions: () => http.get<{ regions: string[] }>('/api/regions')
 }
 
