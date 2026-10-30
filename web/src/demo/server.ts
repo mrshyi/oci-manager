@@ -16,6 +16,9 @@ import { ApiError, AUTH_REQUIRED_EVENT } from '@/api/http'
 import type { ServerEvent, ServerEventType, EventHandlers } from '@/api/events'
 import type * as D from '@/api/types'
 import { STATIC } from './static'
+import { registerLocalRoutes, groupsOf, tagUsageOf } from './local'
+
+export { demoLogStream } from './local'
 
 /* ---------- 小工具 ---------- */
 
@@ -533,6 +536,10 @@ function on(method: string, pattern: string, h: Handler) {
   const keys: string[] = []
   const re = new RegExp('^' + pattern.replace(/\{(\w+)\}/g, (_, k) => { keys.push(k); return '([^/]+)' }) + '$')
   routes.push([method, re, keys, h])
+  // 静态段优先，与 Go 的 ServeMux 一致。少了这一步，后注册的
+  // /api/accounts/tags 会先被 /api/accounts/{id} 匹配走，页面拿到一个 404。
+  // sort 是稳定的，参数个数相同的路由仍按注册顺序匹配。
+  routes.sort((a, b) => a[2].length - b[2].length)
 }
 
 /* 认证 */
@@ -563,7 +570,13 @@ const checkOk = (a: Acct): D.CheckResultDTO => ({
   errorCode: a.status === 'error' ? 'NotAuthenticated' : undefined,
   errorText: a.status === 'error' ? a.statusMessage : undefined
 })
-on('GET', '/api/accounts', () => ({ accounts: structuredClone(accounts) }))
+on('GET', '/api/accounts', () => ({
+  accounts: structuredClone(accounts),
+  // 分组顺序与标签用量都由「服务端」算好：前端不维护第二份口径，
+  // 否则加一个分组规则就要改两处，且迟早不一致。
+  groups: groupsOf(accounts),
+  tags: tagUsageOf(accounts)
+}))
 on('GET', '/api/accounts/{id}', p => structuredClone(acctById(p.id)))
 on('POST', '/api/accounts', (_, __, b) => {
   const id = uid('acc-')
@@ -1143,6 +1156,10 @@ on('POST', '/api/proxies/{id}/check', p => ({ results: [checkProxy(proxies.find(
 /* 总览（前端目前不调用，保留以免 404） */
 on('GET', '/api/overview', () => unsupported('这个接口'))
 
+/* 本地增强版接口：账号组织、权限自检、计费风险、运维任务、CF、备份、预算。
+   实现在 ./local.ts，理由见那个文件开头——server.ts 是上游文件。 */
+registerLocalRoutes({ on, accounts, instances, nets, reservedIps, log, fail, uid, iso, ago })
+
 /* ---------- 入口 ---------- */
 
 /**
@@ -1162,8 +1179,10 @@ export async function demoSend<T>(method: string, path: string, query?: Record<s
       window.dispatchEvent(new CustomEvent(AUTH_REQUIRED_EVENT, { detail: { code: 'unauthenticated' } }))
       fail(401, 'unauthenticated', '请先登录')
     }
-    // 返回深拷贝：页面会直接修改拿到的对象，不能让它改到这里的「数据库」。
-    return structuredClone(h(params, q, structuredClone(body ?? {}))) as T
+    // FormData 不能 structuredClone（会抛 DataCloneError），而备份恢复上传的正是它。
+    // 其余请求体深拷贝一份：页面会直接修改拿到的对象，不能让它改到这里的「数据库」。
+    const input = body instanceof FormData ? body : structuredClone(body ?? {})
+    return structuredClone(h(params, q, input)) as T
   }
   await sleep(200)
   return unsupported('这个操作')

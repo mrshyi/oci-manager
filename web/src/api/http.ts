@@ -213,6 +213,13 @@ async function send<T>(method: Method, path: string, opts: RequestOptions, dange
  */
 async function sendBlob(method: Method, path: string, opts: RequestOptions,
                         dangerCode?: string): Promise<Blob> {
+  // 演示站（GitHub Pages）没有后端，导出交给浏览器里的模拟实现。
+  // 与 send 同一个判断：VITE_DEMO 在构建时被替换成常量，正常构建整段被摇掉。
+  if (import.meta.env.VITE_DEMO === 'true') {
+    const { demoSend } = await import('@/demo/server')
+    return demoSend<Blob>(method, path, opts.query, opts.body)
+  }
+
   const response = await fire(method, path, opts, dangerCode, jsonBody(opts))
   if (!response.ok) throw await toApiError(response)
   return response.blob()

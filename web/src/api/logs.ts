@@ -24,6 +24,15 @@ export interface LogStreamHandlers {
 
 /** 建立日志流连接，返回断开函数。 */
 export function connectLogs(handlers: LogStreamHandlers): () => void {
+  // 演示站：日志来自浏览器里的模拟后端，见 @/demo/server。
+  // 真实后端走 SSE，演示站没有 HTTP 层，所以直接给回调。
+  if (import.meta.env.VITE_DEMO === 'true') {
+    let stop = () => {}
+    let closed = false
+    void import('@/demo/server').then(m => { if (!closed) stop = m.demoLogStream(handlers) })
+    return () => { closed = true; stop() }
+  }
+
   let source: EventSource | null = null
   let opened = false
   let closed = false
