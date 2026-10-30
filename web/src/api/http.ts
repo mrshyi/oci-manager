@@ -181,6 +181,13 @@ function jsonBody(opts: RequestOptions): BodyInit | undefined {
 }
 
 async function send<T>(method: Method, path: string, opts: RequestOptions, dangerCode?: string): Promise<T> {
+  // 演示站（GitHub Pages）没有后端，所有请求交给浏览器里的模拟实现。
+  // VITE_DEMO 在构建时就被替换成常量，正常构建里这个分支连同 demo 模块一起被摇掉。
+  if (import.meta.env.VITE_DEMO === 'true') {
+    const { demoSend } = await import('@/demo/server')
+    return demoSend<T>(method, path, opts.query, opts.body)
+  }
+
   const response = await fire(method, path, opts, dangerCode, jsonBody(opts))
   if (response.status === 204) return undefined as T
   if (!response.ok) throw await toApiError(response)
