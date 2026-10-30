@@ -313,15 +313,17 @@ dev 版本要和生产版本并排跑，四条都必须错开：
 | 容器 | `ocicore-dev` → `healthy`，与生产的 `ocicore` 并存 |
 | 版本 | `/api/status` 返回 `"version":"dev"` |
 | 鉴权 | `/api/tasks`、`/api/jobs`、`/api/instances`、`/api/accounts`、`/api/logs/stream`、`/api/geo/status` 全 401；`POST /api/ops/change-ip` 无 CSRF 403、带 CSRF 未登录 401 |
-| 迁移 | dev 库 **20 表 / 20 索引**，0.4.14 库 11 表 / 10 索引；多出的 9 张正是本地功能：`ops_tasks`、`jobs`、`cf_zones`、`cf_records`、`ip_cache`、`risk_budget`、`account_health`、`account_meta`、`account_tags` |
+| 迁移 | dev 库 **20 表 / 20 索引**（部署时生产还是 0.4.14，11 表 / 10 索引）。生产后来升到 0.5.4（12 表），dev 仍多出 8 张本地表：`ops_tasks`、`cf_zones`、`cf_records`、`ip_cache`、`risk_budget`、`account_health`、`account_meta`、`account_tags` |
 | `ops_tasks` | 22 列，索引 `idx_ops_due` / `idx_ops_account` 齐全 |
 | 日志 | 0 条 ERROR |
 | 磁盘 | 全程增加 34MB（895MB 可用 → 861MB） |
 
-### 10.3 两个容易踩的点
+### 10.3 几个容易踩的点
 
 - **`docker compose` 会报 `volume "ocicore-dev-data" already exists but was not created by Docker Compose`**。数据卷是手动建的，标 `external: true` 即可；顺带的好处是 `docker compose down -v` 删不掉它——里面的 `master.key` 丢不起。
 - **`json-file` 日志驱动默认无限增长**。不到 900MB 的磁盘上，一个跑几十天的面板足以写满根分区。compose 里显式给 `max-size: "10m"` / `max-file: "2"`。
+- **本机 `HTTP_PROXY` 会让 `curl 127.0.0.1:8081` 也走代理**，代理连不上就返回 `502 upstream connect failed`，看起来像容器挂了。本机所有探测加 `--noproxy '*'`，浏览器把 `127.0.0.1` 加进代理例外。
+- **裸 `ssh -L` 隧道会静默断开**（实测跑满 6 小时后被对端 `Connection reset by peer`）。断了之后本机端口消失、浏览器「拒绝连接」，而容器其实好好的。用 `while true; do ssh -N -L ...; sleep 5; done` 配 `ServerAliveInterval=30` 自动重连。
 
 ### 10.4 验收前要准备的东西
 

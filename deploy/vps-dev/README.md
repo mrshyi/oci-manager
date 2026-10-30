@@ -85,20 +85,40 @@ ssh -L 8081:127.0.0.1:8081 root@<vps>
 # 然后浏览器打开 http://127.0.0.1:8081
 ```
 
+裸 `ssh -L` 在网络抖动时会静默断开，隧道端口随之消失，表现为浏览器「拒绝连接」。
+加自动重连循环更省事（同时转发生产 8080，两个版本并排对照）：
+
+```bash
+while true; do
+  ssh -N -L 127.0.0.1:8080:127.0.0.1:8080 \
+         -L 127.0.0.1:8081:127.0.0.1:8081 \
+         -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o TCPKeepAlive=yes \
+         -o ExitOnForwardFailure=yes -o ConnectTimeout=10 \
+         root@<vps>
+  echo "[tunnel] 断开，5 秒后重连 $(date '+%H:%M:%S')"
+  sleep 5
+done
+```
+
+> **本机若设了 `HTTP_PROXY`（很常见），验收用的 `curl 127.0.0.1:8081` 会走代理**，
+> 代理连不上就返回 `502 upstream connect failed`，看起来像服务挂了。全部本机
+> 探测都要加 `--noproxy '*'`。浏览器同理，把 `127.0.0.1` 加进代理例外列表。
+
 ## 验收要点
 
 ```bash
-# 存活 + 版本
-curl -s http://127.0.0.1:8081/api/status
+# 存活 + 版本（--noproxy 别省，见上一节）
+curl -s --noproxy '*' http://127.0.0.1:8081/api/status
 # {"setupRequired":false,"authenticated":false,...,"version":"dev-524c435"}
 
 # 路由已注册且受保护（404 说明没注册，401/403 才是对的）
 for p in tasks jobs instances accounts; do
-  echo "$p -> $(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8081/api/$p)"
+  echo "$p -> $(curl -s --noproxy '*' -o /dev/null -w '%{http_code}' http://127.0.0.1:8081/api/$p)"
 done
 # POST /api/ops/change-ip 无 CSRF 头应 403，带 CSRF 未登录应 401
 
-# 迁移落库：dev 库应比 0.4.14 多出 ops_tasks / jobs / cf_* 等 9 张表
+# 迁移落库：生产升到 0.5.4 之后，dev 库应仍多出 8 张本地表
+# （ops_tasks / cf_zones / cf_records / ip_cache / risk_budget / account_health / account_meta / account_tags）
 python3 -c "
 import sqlite3
 con = sqlite3.connect('file:/var/lib/docker/volumes/ocicore-dev-data/_data/oci-tools.db?mode=ro', uri=True)
@@ -108,13 +128,17 @@ print(sorted(r[0] for r in con.execute(\"select name from sqlite_master where ty
 
 ## 与生产实例的隔离
 
-| 项 | 生产（0.4.14） | dev |
+| 项 | 生产（上游） | dev |
 |---|---|---|
 | 目录 | `/opt/ocicore` | `/opt/ocicore-dev` |
 | 容器名 | `ocicore` | `ocicore-dev` |
-| 镜像 | `ghcr.io/jsongmax/oci-core:0.4.14` | `ocicore:dev` |
+| 镜像 | `ghcr.io/jsongmax/oci-core:0.5.4` | `ocicore:dev` |
 | 端口 | `127.0.0.1:8080` | `127.0.0.1:8081` |
 | 数据卷 | `ocicore_ocicore-data` | `ocicore-dev-data`（副本） |
+
+生产实例跟随上游 tag 升级（只改 compose 的 `image:`，不构建），dev 实例跟随
+`dev` 分支。两者表结构差异随生产升级而变化：生产 0.5.4 是 12 表，dev 是 20 表，
+多出的 8 张就是本地的融合功能。
 
 ## 更新与回滚
 
