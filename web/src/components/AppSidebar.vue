@@ -17,6 +17,9 @@ const items = computed(() => [
   { to: '/resources', icon: '▣', label: '资源' },
   // 徽标只数进行中的：已结束的任务不需要注意力。
   { to: '/jobs', icon: '◷', label: '任务', badge: activeJobCount.value, live: activeJobCount.value > 0 },
+  // 运维任务（opssvc）单独一页：与上面的「任务」是两套系统，可暂停可重试。
+  // 不给徽标——它的进行中数量只在那一页里轮询，没有全局状态可用。
+  { to: '/ops-tasks', icon: '⚒', label: '运维任务' },
   { to: '/capacity', icon: '◇', label: '容量' },
   { to: '/billing', icon: '¤', label: '账单' },
   { to: '/hunt', icon: '◈', label: '守候' },

@@ -30,6 +30,9 @@ var (
 	ServiceOrganizations = Service{Host: "organizations", Version: "20230401", OCIInfix: true}
 	// 用量与成本。数据是租户全局的,但请求仍要发往一个已订阅的区域。
 	ServiceUsage = Service{Host: "usageapi", Version: "20200107", OCIInfix: true}
+	// 网络负载均衡（NLB）是独立服务，不挂在 iaas 下，版本号也自成一套。
+	// 域名形如 networkloadbalancer.{region}.oraclecloud.com，不带 .oci。
+	ServiceNetworkLoadBalancer = Service{Host: "networkloadbalancer", Version: "20200501"}
 )
 
 // realmOf 返回区域所属 realm 的域名后缀。绝大多数商业区域属于 OC1。

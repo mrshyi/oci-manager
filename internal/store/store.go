@@ -30,6 +30,28 @@ var ErrNotFound = errors.New("store: 记录不存在")
 // ErrConflict 表示违反了唯一约束（重复的用户名、租户或账号代号）。
 var ErrConflict = errors.New("store: 记录已存在")
 
+// InvalidError 表示调用方提交的输入不合法（PEM 解析不了、指纹对不上、代号格式错……）。
+//
+// 单独一个类型而不是靠错误文案区分。早先 HTTP 层用「错误串里不含 store: 前缀」
+// 来猜这是不是输入问题，结果是任何一处忘了加前缀的内部错误——SQL 报错、磁盘写满、
+// 解密失败——都会被当成 400 并原样回显给用户：既泄露内部细节，又让真正的故障
+// 看起来像用户填错了。分类必须是显式的，而不是从文案里反推。
+type InvalidError struct{ err error }
+
+func (e *InvalidError) Error() string { return e.err.Error() }
+func (e *InvalidError) Unwrap() error { return e.err }
+
+// Invalidf 构造一个输入校验错误，保留 %w 的包裹语义。
+func Invalidf(format string, args ...any) error {
+	return &InvalidError{err: fmt.Errorf(format, args...)}
+}
+
+// IsInvalid 报告 err 是否属于输入校验失败。
+func IsInvalid(err error) bool {
+	var ie *InvalidError
+	return errors.As(err, &ie)
+}
+
 // Store 持有数据库连接与用于私钥加解密的 Box。
 type Store struct {
 	db  *sql.DB
@@ -123,6 +145,16 @@ var migrations = []string{
 	`ALTER TABLE instances ADD COLUMN baseline_ocpu TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE instances ADD COLUMN secondary_ipv4 TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE instances ADD COLUMN secondary_ipv6 TEXT NOT NULL DEFAULT ''`,
+	// 权限自检结果。存 JSON 而不是拆成五列：这五族随时可能增减
+	// （P2-4 的计费识别就可能再加一族），拆列意味着每加一族都要迁移一次。
+	`ALTER TABLE accounts ADD COLUMN capability_probe TEXT NOT NULL DEFAULT ''`,
+	// 换 IP 任务顺带更新 DNS 的结果。
+	//
+	// 与 result 分成两列而不是拼成一句话：DNS 更新失败不能让一次成功的
+	// 换 IP 变成失败——IP 确实换了、机器是通的，只是域名还指着旧地址。
+	// 混在一个字段里，用户看到"失败"会以为机器坏了，然后去重启机器。
+	`ALTER TABLE ops_tasks ADD COLUMN dns_status TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE ops_tasks ADD COLUMN dns_error TEXT NOT NULL DEFAULT ''`,
 }
 
 func migrate(db *sql.DB) error {
@@ -139,6 +171,25 @@ func migrate(db *sql.DB) error {
 
 // Close 关闭数据库连接。
 func (s *Store) Close() error { return s.db.Close() }
+
+// SnapshotTo 用 VACUUM INTO 把当前库写成一份自洽的副本。
+//
+// 为什么不能直接拷 .db 文件：WAL 模式下已提交的事务可能还留在 -wal 里，
+// 只拷主文件会丢掉最近的数据；把 -wal 一起拷过去又可能遇到版本对不上
+// （进程还在写）。VACUUM INTO 在一个读事务里产出一份完整的库，
+// 不需要停服，也不会带上 WAL。
+//
+// 目标文件必须不存在——SQLite 会拒绝覆盖已有文件，这是它的保护，
+// 我们提前报一个更清楚的错。
+func (s *Store) SnapshotTo(ctx context.Context, dest string) error {
+	if _, err := os.Stat(dest); err == nil {
+		return fmt.Errorf("store: 快照目标已存在: %s", dest)
+	}
+	if _, err := s.db.ExecContext(ctx, "VACUUM INTO ?", dest); err != nil {
+		return fmt.Errorf("store: 生成快照失败: %w", err)
+	}
+	return nil
+}
 
 // DB 暴露底层连接，仅供测试与迁移工具使用。
 func (s *Store) DB() *sql.DB { return s.db }
@@ -195,6 +246,8 @@ CREATE TABLE IF NOT EXISTS accounts (
     status           TEXT NOT NULL DEFAULT 'unchecked',
     status_message   TEXT NOT NULL DEFAULT '',
     last_checked_at  INTEGER,
+    -- 权限自检结果（JSON）。见 migrations 里的同名列
+    capability_probe TEXT NOT NULL DEFAULT '',
     created_at       INTEGER NOT NULL,
     updated_at       INTEGER NOT NULL
 );
@@ -391,6 +444,178 @@ CREATE TABLE IF NOT EXISTS proxies (
     -- socks5 端口是两条独立的路。
     UNIQUE(scheme, host, port, username)
 );
+
+-- 调用预算：每个账号在每个小时窗口里对 OCI 发起了多少次调用。
+--
+-- 落库而不是只放内存，是因为重启恰好发生在任务出问题、调用量最大的时候：
+-- 只存内存的话，重启一次预算就清零，降频立刻消失，于是「重启一下好像就好了」
+-- 变成一个自我实现的错误结论。
+--
+-- 不设外键：计数是旁路统计，账号刚被删掉时的一次写入失败不该让用户的
+-- 正常操作跟着失败。旧行由 PurgeRiskBudget 定期清理。
+CREATE TABLE IF NOT EXISTS risk_budget (
+    -- 账号的本地 ID（不是租户 OCID）
+    account_id   TEXT NOT NULL,
+    -- 小时对齐的 Unix 秒，与 riskguard.WindowStart 的算法必须一致
+    window_start INTEGER NOT NULL,
+    calls        INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (account_id, window_start)
+);
+CREATE INDEX IF NOT EXISTS idx_risk_budget_window ON risk_budget(window_start);
+
+-- ── 通用运维任务 ──────────────────────────────────────────────
+-- 与 hunt_tasks 并列而不是合并（方案 ADR-4 原本要求合并，实施时改了，见计划 §7.1）：
+-- 抢机的字段（可用域轮换、规格快照、IPv6 预处理）与运维任务的字段（阶段、
+-- 进度）几乎没有交集，合表会变成两张表的并集加一堆半空列，而每个查询都要
+-- 多带一串 kind = ? 分支。共享的是调度器（internal/tasksched），不是存储。
+CREATE TABLE IF NOT EXISTS ops_tasks (
+    id               TEXT PRIMARY KEY,
+    -- hunt / change_ip_cidr / open_ports / enable_500m / rescue / bulk
+    kind             TEXT NOT NULL,
+    account_id       TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    instance_id      TEXT NOT NULL DEFAULT '',
+    -- 给人看的标签。方案里的建表语句没有这一列，但列表与审计都需要一个
+    -- 可读的标识，靠 kind + id 拼出来的东西没人认得。
+    name             TEXT NOT NULL DEFAULT '',
+    spec             TEXT NOT NULL DEFAULT '{}',
+    state            TEXT NOT NULL DEFAULT 'pending',
+    -- 分阶段任务（救援）当前停在哪一步
+    stage            TEXT NOT NULL DEFAULT '',
+    progress         TEXT NOT NULL DEFAULT '{}',
+    attempts         INTEGER NOT NULL DEFAULT 0,
+    max_attempts     INTEGER NOT NULL DEFAULT 30,
+    interval_seconds INTEGER NOT NULL DEFAULT 20,
+    last_error       TEXT NOT NULL DEFAULT '',
+    result           TEXT NOT NULL DEFAULT '',
+    expires_at       INTEGER NOT NULL DEFAULT 0,
+    next_at          INTEGER NOT NULL DEFAULT 0,
+    started_at       INTEGER NOT NULL DEFAULT 0,
+    finished_at      INTEGER NOT NULL DEFAULT 0,
+    created_at       INTEGER NOT NULL,
+    updated_at       INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_ops_due     ON ops_tasks(state, next_at);
+CREATE INDEX IF NOT EXISTS idx_ops_account ON ops_tasks(account_id, state);
+
+-- 账号标签。一个账号可以有多个，标签是自由文本。
+--
+-- 单独建表而不是在 accounts 上加一列逗号分隔的字符串：筛选要按标签反查
+-- 账号（WHERE tag = ?），逗号串只能全表扫再在内存里切；而标签的增删改
+-- 在串上都是"读-改-写"，两个并发请求会互相覆盖。
+CREATE TABLE IF NOT EXISTS account_tags (
+    account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    tag        TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (account_id, tag)
+);
+-- 反查方向：从标签找账号。列表页的筛选器走这条路。
+CREATE INDEX IF NOT EXISTS idx_account_tags_tag ON account_tags(tag);
+
+-- 账号的附加信息。与 accounts 分表是因为这些字段是可选的、可空的，
+-- 且大多数账号根本不会填——塞进主表会让 accounts 的列继续膨胀，
+-- 而每次列表查询都要为几个通常为空的列付代价。
+CREATE TABLE IF NOT EXISTS account_meta (
+    account_id  TEXT PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
+    -- 分组名。空串表示"未分组"，前端把这类账号归到最后一组。
+    group_name  TEXT NOT NULL DEFAULT '',
+    note        TEXT NOT NULL DEFAULT '',
+    -- 账号到期时间。试用号到期后实例会被回收，列表页要提前提醒。
+    expires_at  INTEGER,
+    -- 手动排序权重，大的在前。默认 0 表示不干预，退回到创建时间顺序。
+    sort_weight INTEGER NOT NULL DEFAULT 0,
+    -- 预留给抢机页的「已知悉」标记。当前只做存取，没有任何流程依赖它。
+    hunt_ack_at INTEGER,
+    updated_at  INTEGER NOT NULL
+);
+
+-- 账号健康度。单独建表而不是往 accounts 上加列，理由与 account_meta 相同：
+-- 这是"最近一次校验的结论"，每次校验都会整体改写，与账号配置的读写频率
+-- 完全不同；混在一起会让 accounts 的每次 UPDATE 都要顺带重写这几列。
+CREATE TABLE IF NOT EXISTS account_health (
+    account_id TEXT PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
+    -- 最近一次校验成功的时刻。NULL 表示从来没成功过。
+    last_ok_at INTEGER,
+    -- 最近一次失败的分类，取 ociclient.Class 的名字（AuthFailed / Throttled …）。
+    -- 成功时清空，所以"有 last_error_at 但没有 class"只可能是刚恢复。
+    last_error_class TEXT NOT NULL DEFAULT '',
+    last_error_at INTEGER,
+    last_error_message TEXT NOT NULL DEFAULT '',
+    -- 连续凭据类失败次数。非凭据类结果（成功、限流、配额、网络抖动）会把它归零，
+    -- 因为它对"这份密钥还能不能用"没有信息量。见 accountsvc.Next。
+    consecutive_failures INTEGER NOT NULL DEFAULT 0,
+    -- 是否已经确认凭据不可用。连续失败达到阈值才置 1，单次抖动不置。
+    fatal INTEGER NOT NULL DEFAULT 0,
+    updated_at INTEGER NOT NULL
+);
+
+-- 顶部红区块要按 fatal 筛，列表页要按 level 排，两者都会扫这张表。
+CREATE INDEX IF NOT EXISTS idx_account_health_fatal ON account_health(fatal);
+
+-- Cloudflare 区（zone）。token 与账号私钥、代理密码同一套信封加密，
+-- 因为它等价于「这个域名的全部 DNS 写权限」。
+--
+-- account_id 可以为空：一个 CF 账号下的域名可能同时指向多个 OCI 账号里的
+-- 机器，硬绑到某个 OCI 账号上会逼用户为同一个 zone 录两遍 token。
+CREATE TABLE IF NOT EXISTS cf_zones (
+    id               TEXT PRIMARY KEY,
+    account_id       TEXT NOT NULL DEFAULT '',
+    zone_id          TEXT NOT NULL,
+    zone_name        TEXT NOT NULL DEFAULT '',
+    token_ciphertext BLOB,
+    token_nonce      BLOB,
+    enabled          INTEGER NOT NULL DEFAULT 1,
+    last_sync_at     INTEGER NOT NULL DEFAULT 0,
+    last_error       TEXT NOT NULL DEFAULT '',
+    created_at       INTEGER NOT NULL,
+    updated_at       INTEGER NOT NULL
+);
+
+-- 同一个 zone 只能录一次。重复录入会让同一个域名有两条 token，
+-- 之后改 A 记录时用哪一条完全看遍历顺序。
+CREATE UNIQUE INDEX IF NOT EXISTS idx_cf_zones_zone ON cf_zones(zone_id);
+
+-- 一条绑定的含义是「这条 A 记录跟随这台机器」。换 IP 之后同步的就是它。
+--
+-- 刻意不用外键约束到 instances：实例被终止后，用户往往还想保留这条绑定
+-- （下次同名机器起来时手动同步一次），级联删除会把配置一起带走。
+CREATE TABLE IF NOT EXISTS cf_records (
+    id           TEXT PRIMARY KEY,
+    zone_pk      TEXT NOT NULL,
+    record_id    TEXT NOT NULL,
+    name         TEXT NOT NULL,
+    type         TEXT NOT NULL DEFAULT 'A',
+    proxied      INTEGER NOT NULL DEFAULT 0,
+    ttl          INTEGER NOT NULL DEFAULT 1,
+    account_id   TEXT NOT NULL DEFAULT '',
+    instance_id  TEXT NOT NULL DEFAULT '',
+    last_ip      TEXT NOT NULL DEFAULT '',
+    last_sync_at INTEGER NOT NULL DEFAULT 0,
+    last_error   TEXT NOT NULL DEFAULT '',
+    created_at   INTEGER NOT NULL,
+    updated_at   INTEGER NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_cf_records_rid ON cf_records(zone_pk, record_id);
+CREATE INDEX IF NOT EXISTS idx_cf_records_inst ON cf_records(instance_id);
+
+-- IP 情报缓存。离线库（GeoLite2）查一次是内存操作，本不需要缓存；
+-- 这张表存在的理由是「查不到时也要留痕」：哪个 IP 查过、用的哪个库版本、
+-- 结果是空的——排障时要能区分「这个 IP 确实没有归属地」和「库没加载」。
+CREATE TABLE IF NOT EXISTS ip_cache (
+    ip           TEXT PRIMARY KEY,
+    country      TEXT NOT NULL DEFAULT '',
+    country_code TEXT NOT NULL DEFAULT '',
+    region       TEXT NOT NULL DEFAULT '',
+    city         TEXT NOT NULL DEFAULT '',
+    latitude     REAL NOT NULL DEFAULT 0,
+    longitude    REAL NOT NULL DEFAULT 0,
+    asn          TEXT NOT NULL DEFAULT '',
+    org          TEXT NOT NULL DEFAULT '',
+    -- source 记录这条是谁填的：mmdb（离线库）或 manual（用户手填）。
+    -- 空字符串表示查过但没查到。
+    source       TEXT NOT NULL DEFAULT '',
+    updated_at   INTEGER NOT NULL DEFAULT 0
+);
 `
 
 // newID 生成 16 位十六进制的主键。对本工具的规模而言，128 位熵远超需求。
@@ -405,7 +630,19 @@ func newID() (string, error) {
 func nowUnix() int64 { return time.Now().Unix() }
 
 // unixToTime 把数据库里的 Unix 秒转成 time.Time。
-func unixToTime(v int64) time.Time { return time.Unix(v, 0) }
+//
+// 0 一律还原成零值 Time，而不是 1970-01-01。这是与 timeToUnix 的对称要求：
+// 零值 Time 存进去是 0，读回来必须还是零值，否则 IsZero() 永远为假。
+//
+// 这个不对称曾经真实咬过人：hunt_tasks.expires_at 存 0 表示"不设到期"，
+// 读回来变成 1970 之后 shouldStop 判定"任务已到期"，于是不设到期时间的守候
+// 任务一上线就被判死，而且错误文案看起来完全合理，没人会怀疑是序列化问题。
+func unixToTime(v int64) time.Time {
+	if v == 0 {
+		return time.Time{}
+	}
+	return time.Unix(v, 0)
+}
 
 // nullUnixToTime 处理可空的时间列。
 func nullUnixToTime(v sql.NullInt64) *time.Time {

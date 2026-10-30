@@ -29,6 +29,7 @@
 - [下载预编译二进制](#下载预编译二进制)
 - [Docker 部署](#docker-部署)
 - [本地开发](#本地开发)
+- [分支策略](#分支策略)
 - [配置](#配置)
 - [安全须知](#安全须知)
 - [架构](#架构)
@@ -377,6 +378,34 @@ ci: 多架构镜像推送到 GHCR
 
 ---
 
+## 分支策略
+
+本仓库 fork 自 [jsongmax/oci-core](https://github.com/jsongmax/oci-core)，两个分支分工固定：
+
+| 分支 | 角色 |
+|---|---|
+| `main` | 上游 `oci-core` 的镜像，只由 `git merge --ff-only upstream/main` 推进，**不放本地改动** |
+| `dev` | 本 fork 的实际开发分支，所有本地改动都在这里 |
+
+同步上游时有两处要人工处理：`internal/web/dist` 是入库的构建产物，合并后要按本地
+`web/src` 重新构建，不要直接接受上游那份；`v0.4.14 → v0.5.4` 之间还有一处架构重叠
+——上游的 `jobsvc` 与本地的 `opssvc` 是两套并存的后台任务系统，职责不同，不要二选一。
+
+```bash
+# 一次性配置
+git remote add upstream git@github.com:jsongmax/oci-core.git
+git config merge.ours.driver true
+
+# 同步上游并合进 dev —— 严格两步：main 同步上游，然后 dev 合并 main
+scripts/merge-upstream.sh --check   # 先看会冲突哪些文件
+scripts/merge-upstream.sh           # 执行（含重建 dist 与跑测试）
+```
+
+上游发版很快（七天 16 个提交），节奏定成**每个上游 tag 跟一次**，别攒着合并。
+一次跨太多版本时用 `--until v0.5.0` 分段推进。
+
+---
+
 ## 配置
 
 全部通过环境变量。
@@ -386,6 +415,7 @@ ci: 多架构镜像推送到 GHCR
 | `OCICORE_ADDR` | `127.0.0.1:8080` | 监听地址。**容器内必须设成 `0.0.0.0:8080`** |
 | `OCICORE_DATA_DIR` | `./data` | 数据库与主密钥目录 |
 | `OCICORE_MASTER_KEY` | 空 | 十六进制主密钥，留空则用 `$DATA_DIR/master.key` |
+| `OCICORE_ALLOW_NEW_MASTER_KEY` | `false` | 库中已有加密数据、`master.key` 却不存在时，默认拒绝启动。确认库里没有要保留的数据后才设成 `true` 放行——新建的主密钥会让原有密文永久无法解密 |
 | `OCICORE_STATIC_DIR` | 空 | 前端产物目录，非空时优先于嵌入资源（开发用） |
 | `OCICORE_SESSION_TTL` | `12h` | 会话有效期，滑动续期 |
 | `OCICORE_TRUST_PROXY` | `false` | 是否采信 `X-Forwarded-*`。**仅在确实位于反向代理之后才可开启** |

@@ -27,7 +27,7 @@ function dots(n: number): string {
 /**
  * 邮箱：保留首字母与完整域名。
  *
- *   jsongmax@gmail.com  ->  j••••••@gmail.com
+ *   user@example.com  ->  u••••@example.com
  *
  * 保留域名是有意的——它几乎不敏感，却能让你一眼看出这是哪类账号
  * （自己的 Gmail 还是公司邮箱）。真正不该露的是本地部分。

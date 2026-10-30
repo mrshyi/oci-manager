@@ -5,6 +5,43 @@ export type LifecycleState =
 
 export type AccountStatus = 'ok' | 'checking' | 'error' | 'disabled'
 
+/**
+ * 账号健康度色块。
+ *
+ * 与 AccountStatus 的区别：status 只有"上次校验成没成"，health 说明
+ * "为什么不成、要不要人管"。被限流是黄（等一会儿就好），密钥失效是红
+ * （必须去控制台），两者都叫 error 但处理方式完全不同。
+ *
+ * unknown 是"还没校验过"，不能当成绿——那等于向用户保证一件没人验证过的事。
+ */
+export type AccountHealth = 'unknown' | 'green' | 'yellow' | 'orange' | 'red'
+
+/** 一族能力的探测结论。key 稳定，前端按它匹配图标 */
+export interface Capability {
+  key: string
+  label: string
+  /** 接口调通了、拿到了数据 */
+  ok: boolean
+  /** 不可用的原因是缺权限（要去加策略），而不是接口报错（重试可能就好） */
+  denied: boolean
+  class: string
+  detail: string
+  /** 缺权限时该补的 IAM 策略 */
+  policy: string
+  /** 探测到的资源数量 */
+  count: number
+  durationMs: number
+}
+
+/** 一次权限自检的结果 */
+export interface CapabilityProbe {
+  region: string
+  probedAt: string
+  items: Capability[]
+  /** 一句话结论 */
+  summary: string
+}
+
 /** 1–8，对应 --acct-N。接入时分配后不再变化（§5.2） */
 export type AccountColorIndex = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8
 
@@ -49,6 +86,34 @@ export interface Account {
   /** 配额数据来自哪个区域（后端只查主区域），为空表示还没拉到 */
   quotaRegion: string
   createdAt: string
+
+  /** 自由文本标签。没有标签时是空数组，模板里可以无脑 v-for */
+  tags: string[]
+  /** 分组名。空串表示未分组 */
+  group: string
+  note: string
+  /** 到期日（ISO）。null 表示不设提醒 */
+  expiresAt: string | null
+  /** 距离到期的天数：负数已过期，0 今天，null 不设到期 */
+  expiryDays: number | null
+  /** 手动排序权重，大的在前 */
+  sortWeight: number
+
+  /** 健康度色块。level 由后端算好，前端只负责画 */
+  health: AccountHealth
+  /** 连续凭据类失败次数。0 表示没在连续失败 */
+  healthFailures: number
+  /** 最近一次失败的错误分类名，如 AuthFailed */
+  healthErrorClass: string
+  /** 最后一次失败的时刻（ISO）。成功不清空，是历史事实 */
+  healthErrorAt: string | null
+  /** 最近一次成功的时刻（ISO）。null 表示从来没成功过 */
+  healthOkAt: string | null
+  /** 给用户看的一句话说明 */
+  healthAdvice: string
+
+  /** 上次权限自检的结果。null 表示还没自检过 */
+  capability: CapabilityProbe | null
 }
 
 export interface Instance {

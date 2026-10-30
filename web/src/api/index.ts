@@ -55,7 +55,8 @@ export interface CreateAccountInput {
 }
 
 export const accounts = {
-  list: () => http.get<{ accounts: D.AccountDTO[] }>('/api/accounts'),
+  /** 列表连同标签、分组与筛选器要用的标签清单一次返回，避免三次往返 */
+  list: () => http.get<D.AccountsResponseDTO>('/api/accounts'),
 
   get: (id: string) => http.get<D.AccountDTO>(`/api/accounts/${id}`),
 
@@ -101,12 +102,98 @@ export const accounts = {
   parseConfig: (text: string) =>
     http.post<{ profiles: D.ConfigProfileDTO[] }>('/api/accounts/parse-config', { text }),
 
+  /** 整体替换账号标签（PUT 语义：没列出来的就是删掉） */
+  setTags: (id: string, tags: string[]) =>
+    http.put<{ tags: string[] }>(`/api/accounts/${id}/tags`, { tags }),
+
+  getTags: (id: string) => http.get<{ tags: string[] }>(`/api/accounts/${id}/tags`),
+
+  /** 所有标签及使用次数，供输入联想 */
+  tagUsage: () => http.get<{ tags: D.TagUsageDTO[] }>('/api/accounts/tags'),
+
+  /** 整体替换账号附加信息（分组 / 备注 / 到期 / 权重） */
+  setMeta: (id: string, meta: {
+    groupName: string; note: string
+    /** 只给日期也行（YYYY-MM-DD），服务端两种都收 */
+    expiresAt: string | null
+    sortWeight: number
+    huntAckAt?: string | null
+  }) => http.put<{ meta: D.AccountMetaDTO }>(`/api/accounts/${id}/meta`, meta),
+
+  getMeta: (id: string) => http.get<{ meta: D.AccountMetaDTO }>(`/api/accounts/${id}/meta`),
+
+  /** 健康度。列表接口已经带上了，这个用于单账号刷新 */
+  getHealth: (id: string) => http.get<D.AccountHealthDTO>(`/api/accounts/${id}/health`),
+
+  /**
+   * 清除健康度记录，红块随之消失。
+   *
+   * 不是永久静音：下一次校验若仍然失败，红块会重新出现。
+   */
+  clearHealth: (id: string) => http.del<D.AccountHealthDTO>(`/api/accounts/${id}/health`),
+
+  /** 上次权限自检的结果。没自检过时 probe 为 null，并带回五族清单 */
+  capabilityProbe: (id: string) =>
+    http.get<D.CapabilityProbeResponseDTO>(`/api/accounts/${id}/capability-probe`),
+
+  /** 立刻跑一次权限自检。只读，但会记审计 */
+  runCapabilityProbe: (id: string) =>
+    http.post<D.CapabilityProbeResponseDTO>(`/api/accounts/${id}/capability-probe`),
+
+  /**
+   * 计费风险评估：这个账号上有没有东西正在扣钱。
+   *
+   * 只读，不走二次确认。取不到数据的项会以 attention 条目返回，
+   * 所以 items 为空才是真的「没发现风险」。
+   */
+  billingRisk: (id: string) => http.get<D.BillingRiskDTO>(`/api/accounts/${id}/billing-risk`),
+
   checkDraft: (draft: {
     tenancyOcid: string; userOcid: string; fingerprint: string
     privateKeyPem: string; region: string; proxyUrl?: string
     /** 由服务端解析代理地址，带密码的 URL 不经过前端 */
     proxyId?: string
   }) => http.post<D.CheckResultDTO>('/api/accounts/check-draft', draft)
+}
+
+/* ---------- 云侧策略模板 ---------- */
+
+export const iam = {
+  /**
+   * 8 条策略模板。group 留空则保留占位符。
+   *
+   * 只读接口，返回的是文案而不是「生成出来的策略」——
+   * 面板不持有 IAM 写权限。
+   */
+  policyTemplate: (group?: string) =>
+    http.get<D.PolicyTemplateDTO>('/api/iam/policy-template', { query: { group } })
+}
+
+/* ---------- 备份与恢复 ---------- */
+
+export const backup = {
+  /** 是否有等待重启生效的恢复 */
+  status: () => http.get<D.BackupStatusDTO>('/api/backup'),
+
+  /** 导出一份加密备份。返回二进制，不是 JSON */
+  exportArchive: (password: string, includeMasterKey: boolean) =>
+    http.postBlob('/api/backup/export', { password, includeMasterKey }),
+
+  /**
+   * 上传并暂存一份备份。
+   *
+   * confirm 必须回传 "RESTORE"：这是 L4 复核的实质部分，
+   * 打的过程就是最后三秒钟的复核机会。
+   */
+  restore: (file: File, password: string, allowMasterKeyChange: boolean) => {
+    const form = new FormData()
+    form.append('password', password)
+    if (allowMasterKeyChange) form.append('allowMasterKeyChange', 'true')
+    form.append('file', file)
+    return http.postForm<D.RestoreResultDTO>('/api/backup/restore', form, {
+      query: { confirm: 'RESTORE' }
+    })
+  }
 }
 
 /* ---------- 实例 ---------- */
@@ -499,4 +586,60 @@ export const passwordPolicy = {
   set: (accountId: string, input: { days?: number | null; disable?: boolean }) =>
     http.patch<D.PasswordPolicyResultDTO>(
       `/api/accounts/${accountId}/password-policy`, input)
+}
+
+/* ---------- Cloudflare 联动 ---------- */
+
+export const cf = {
+  list: () => http.get<D.CFListDTO>('/api/cf/zones'),
+
+  /** zone 可以是 zone id、域名，或控制台地址 */
+  addZone: (input: { zone: string; token: string; accountId?: string }) =>
+    http.post<{ zone: D.CFZoneDTO }>('/api/cf/zones', input),
+
+  updateZone: (id: string, patch: { enabled?: boolean; token?: string; accountId?: string }) =>
+    http.patch<{ zone: D.CFZoneDTO }>(`/api/cf/zones/${id}`, patch),
+
+  removeZone: (id: string) => http.del<{ ok: boolean }>(`/api/cf/zones/${id}`),
+
+  /** 重新验证 token，并把域名回填到本地 */
+  verifyZone: (id: string) =>
+    http.post<{ zone: D.CFZoneDTO }>(`/api/cf/zones/${id}/verify`, {}),
+
+  /** 拉 Cloudflare 侧的 A 记录，供绑定选择 */
+  remoteRecords: (id: string) =>
+    http.get<{ records: D.CFRemoteRecordDTO[] }>(`/api/cf/zones/${id}/records`),
+
+  addRecord: (input: {
+    zonePk: string
+    recordId: string
+    name: string
+    ttl?: number
+    proxied?: boolean
+    accountId?: string
+    instanceId: string
+  }) => http.post<{ record: D.CFRecordDTO }>('/api/cf/records', input),
+
+  removeRecord: (id: string) => http.del<{ ok: boolean }>(`/api/cf/records/${id}`),
+
+  /** 立刻把这条记录同步到实例当前公网 IP */
+  syncRecord: (id: string) =>
+    http.post<D.CFSyncResultDTO>(`/api/cf/records/${id}/sync`, {})
+}
+
+/* ---------- IP 情报与分布 ---------- */
+
+export const geo = {
+  status: () => http.get<{ status: D.GeoStatusDTO; cachedIps: number; knownRegions: number }>(
+    '/api/geo/status'),
+
+  distribution: () => http.get<D.GeoDistributionDTO>('/api/geo/distribution'),
+
+  /** 手填的位置不会被离线库覆盖 */
+  setManual: (input: {
+    ip: string; country?: string; city?: string; latitude: number; longitude: number
+  }) => http.put<{ info: unknown }>('/api/geo/manual', input),
+
+  clearManual: (ip: string) =>
+    http.del<{ ok: boolean }>(`/api/geo/manual/${encodeURIComponent(ip)}`)
 }

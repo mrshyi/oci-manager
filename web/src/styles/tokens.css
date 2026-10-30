@@ -20,12 +20,16 @@
   --warning: #f59e0b;
   --danger: #ef4444;
   --info: #3b82f6;
+  /* 橙色单列一个令牌：健康度里它是"账号没坏但做不成事"（配额满），
+     与 warning 的"暂时性问题"是两回事，共用一个色会看不出区别 */
+  --health-orange: #f97316;
   --transition-color: var(--accent);
   --neutral: #6b7280;
 
   --accent-soft: rgba(34, 211, 238, 0.1);
   --success-soft: rgba(16, 185, 129, 0.12);
   --warning-soft: rgba(245, 158, 11, 0.12);
+  --health-orange-soft: rgba(249, 115, 22, 0.12);
   --danger-soft: rgba(239, 68, 68, 0.1);
   --info-soft: rgba(59, 130, 246, 0.12);
 
@@ -71,11 +75,13 @@
   --warning: #d97706;
   --danger: #dc2626;
   --info: #2563eb;
+  --health-orange: #ea580c;
   --neutral: #9ca3af;
 
   --accent-soft: rgba(8, 145, 178, 0.09);
   --success-soft: rgba(5, 150, 105, 0.1);
   --warning-soft: rgba(217, 119, 6, 0.1);
+  --health-orange-soft: rgba(234, 88, 12, 0.1);
   --danger-soft: rgba(220, 38, 38, 0.08);
   --info-soft: rgba(37, 99, 235, 0.1);
 

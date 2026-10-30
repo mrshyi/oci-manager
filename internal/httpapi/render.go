@@ -5,7 +5,9 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/netip"
 	"strings"
 
 	"ocicore/internal/store"
@@ -76,33 +78,78 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
 
 // clientIP 提取客户端 IP。
 //
-// 只有在明确配置了 TrustProxyHeaders 时才采信 X-Forwarded-For ——
-// 否则任何人都能伪造该头来绕过登录失败限流。
+// 只有当 TCP 来源落在 TrustedProxies 里时才采信 X-Forwarded-For —— 否则
+// 任何人都能伪造该头来绕过登录失败限流。早先这里只判一个布尔开关，
+// 打开就等于信任所有人：开关一旦为真，伪造者每次换一个 IP 就能无限次试密码，
+// 而限流器看起来工作正常，只是永远不会命中。
 func (s *Server) clientIP(r *http.Request) string {
-	if s.cfg.TrustProxyHeaders {
-		// 取最后一段，不是第一段。
-		//
-		// X-Forwarded-For 是「客户端声称的值, 代理逐跳追加的值」。第一段完全
-		// 由客户端控制：攻击者发 `X-Forwarded-For: 1.2.3.4`，nginx 会把真实
-		// IP 追加在后面变成 `1.2.3.4, <真实IP>`。取第一段就等于让攻击者自选
-		// 限流桶——每次换一个伪造 IP，登录爆破的次数限制就完全失效了，
-		// 审计日志记下的也是伪造 IP。
-		//
-		// 最后一段是紧邻本服务的那一跳写的，也就是我们信任的那个代理填的值。
-		// 这在「恰好一层可信代理」下正确；多层代理需要按跳数回溯，
-		// 那属于更复杂的部署，本工具不做支持。
-		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-			if idx := strings.LastIndexByte(xff, ','); idx >= 0 {
-				return strings.TrimSpace(xff[idx+1:])
-			}
-			return strings.TrimSpace(xff)
+	remote := hostOnly(r.RemoteAddr)
+	if len(s.cfg.TrustedProxies) == 0 || !s.trustedProxy(remote) {
+		return remote
+	}
+
+	// X-Forwarded-For 是「客户端声称的值, 各层代理逐跳追加的值」，越靠右
+	// 越接近本服务。从右往左走，第一个不在可信列表里的就是真实来源：
+	// 它左边的一切都只是上游的声称，可以随便写。
+	hops := forwardedHops(r.Header.Values("X-Forwarded-For"))
+	for i := len(hops) - 1; i >= 0; i-- {
+		if !s.trustedProxy(hops[i]) {
+			return hops[i]
 		}
 	}
-	host := r.RemoteAddr
-	if idx := strings.LastIndex(host, ":"); idx > 0 {
-		host = host[:idx]
+	// 整条链都在可信网段内（例如客户端本身也走内网），取最左的起点。
+	if len(hops) > 0 {
+		return hops[0]
 	}
-	return strings.Trim(host, "[]")
+	return remote
+}
+
+// trustedProxy 判断某个地址是否落在配置的可信代理网段内。
+//
+// 解析失败一律视为不可信：这是唯一安全的默认值——判错方向的代价是
+// 一个伪造来源被当成真实 IP，而限流与审计都建立在它之上。
+func (s *Server) trustedProxy(ip string) bool {
+	addr, err := netip.ParseAddr(strings.Trim(ip, "[]"))
+	if err != nil {
+		return false
+	}
+	addr = addr.Unmap()
+	for _, p := range s.cfg.TrustedProxies {
+		if p.Contains(addr) {
+			return true
+		}
+	}
+	return false
+}
+
+// forwardedHops 展开全部 X-Forwarded-For 头并拆成逐跳地址。
+//
+// 无法解析成 IP 的段直接丢弃：留着它只会给伪造者一个免费的新限流桶
+// （每个请求塞一段乱码，clientIP 就返回一个新字符串）。
+func forwardedHops(values []string) []string {
+	var out []string
+	for _, v := range values {
+		for _, part := range strings.Split(v, ",") {
+			part = strings.TrimSpace(part)
+			if part == "" {
+				continue
+			}
+			if _, err := netip.ParseAddr(strings.Trim(part, "[]")); err != nil {
+				continue
+			}
+			out = append(out, part)
+		}
+	}
+	return out
+}
+
+// hostOnly 去掉地址里的端口与 IPv6 方括号。
+func hostOnly(addrport string) string {
+	if host, _, err := net.SplitHostPort(addrport); err == nil {
+		return host
+	}
+	// 没有端口的裸地址（例如 unix socket 或测试里直接赋的值）。
+	return strings.Trim(addrport, "[]")
 }
 
 // isSecureRequest 判断连接是否是 HTTPS，用于决定 Cookie 的 Secure 标志。
@@ -110,7 +157,8 @@ func (s *Server) isSecureRequest(r *http.Request) bool {
 	if r.TLS != nil {
 		return true
 	}
-	if s.cfg.TrustProxyHeaders {
+	// 与 clientIP 同一条信任边界：只有来源本身可信时，它转述的协议才可信。
+	if len(s.cfg.TrustedProxies) > 0 && s.trustedProxy(hostOnly(r.RemoteAddr)) {
 		return strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
 	}
 	return false

@@ -124,6 +124,10 @@ type updateSecurityListRequest struct {
 //
 // OCI 的语义是整体替换而非增量追加，因此前端必须提交完整规则集。
 // 这一点在接口文档里要写清楚，否则很容易把没提交的规则静默删掉。
+//
+// 定为 L4：整体替换一旦漏掉 SSH 规则，用户就被关在门外，而唯一能改回来的
+// 入口正是刚被关掉的那条规则——错了之后连补救的入口都没了。所以除了 TOTP
+// 还要求回传安全列表的显示名，名字从 OCI 查，不从请求里取。
 func (s *Server) handleUpdateSecurityList(w http.ResponseWriter, r *http.Request) {
 	client, _, region, ok := s.resolveTarget(w, r)
 	if !ok {
@@ -135,6 +139,15 @@ func (s *Server) handleUpdateSecurityList(w http.ResponseWriter, r *http.Request
 	}
 
 	listID := r.PathValue("id")
+	before, err := client.GetSecurityList(r.Context(), region, listID)
+	if err != nil {
+		writeOCIError(w, err)
+		return
+	}
+	if !s.requireNamedConfirm(w, r, before.DisplayName) {
+		return
+	}
+
 	updated, err := client.UpdateSecurityList(r.Context(), region, listID, req.Ingress, req.Egress)
 	if err != nil {
 		writeOCIError(w, err)
@@ -156,6 +169,10 @@ func (s *Server) handleUpdateSecurityList(w http.ResponseWriter, r *http.Request
 	if len(req.Egress) == 0 {
 		detail += "（已无出站规则，该子网将无法访问外网）"
 	}
+	// 记下改前规模：事后判断「是不是我误删了规则」，靠的是前后对比，
+	// 而改后的数字可以从 OCI 现查，改前的只有这里留下。
+	detail += "；改前 入站 " + itoa(len(before.IngressSecurityRules)) + " 条，出站 " +
+		itoa(len(before.EgressSecurityRules)) + " 条"
 
 	user := userFrom(r.Context())
 	_ = s.st.Audit(r.Context(), store.AuditEntry{

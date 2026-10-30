@@ -16,13 +16,46 @@ import (
 	"ocicore/internal/store"
 )
 
+// handleListAccounts 返回全部账号，附带标签与附加信息。
+//
+// 三样东西一次返回而不是拆成三个接口：账号页打开时同时需要账号列表、
+// 每个账号的标签、以及筛选器要用的标签清单。拆开就是三次往返，而且
+// 三者之间有一致性要求（筛选器里出现的标签必须真的能筛出账号），
+// 分开取会在两次请求之间出现「筛选器有 A 但没人带 A」的瞬间。
 func (s *Server) handleListAccounts(w http.ResponseWriter, r *http.Request) {
-	accounts, err := s.st.ListAccounts(r.Context())
+	ctx := r.Context()
+	accounts, err := s.st.ListAccounts(ctx)
 	if err != nil {
 		writeStoreError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"accounts": accounts})
+	tags, err := s.st.AllAccountTags(ctx)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	meta, err := s.st.AllAccountMeta(ctx)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	usage, err := s.st.TagUsage(ctx)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	health, err := s.st.AllAccountHealth(ctx)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+
+	views := accountsvc.Merge(accounts, tags, meta, health, time.Now())
+	writeJSON(w, http.StatusOK, map[string]any{
+		"accounts": views,
+		"groups":   accountsvc.Groups(views),
+		"tags":     usage,
+	})
 }
 
 func (s *Server) handleGetAccount(w http.ResponseWriter, r *http.Request) {
@@ -218,20 +251,25 @@ func (s *Server) handleCheckAccount(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, result)
 }
 
-// checkAccount 执行校验并把结论写回账号状态。返回 nil 表示解密或建连本身就失败了。
+// checkAccount 执行校验并把结论写回账号状态与健康度。返回 nil 表示解密或建连本身就失败了。
 func (s *Server) checkAccount(ctx context.Context, acc *store.Account) *accountsvc.Result {
 	client, err := s.conns.For(ctx, acc)
 	if err != nil {
 		msg := err.Error()
 		_ = s.st.SetAccountStatus(ctx, acc.ID, store.StatusError, msg)
-		return &accountsvc.Result{
+		result := &accountsvc.Result{
 			OK:           false,
 			ErrorText:    msg,
+			ErrorClass:   ociclient.ClassAuthFailed.String(),
 			AccountFatal: true,
 			Steps: []accountsvc.Step{
 				{Key: "credentials", Label: "读取凭据", OK: false, Detail: msg},
 			},
 		}
+		// 本地私钥读不出来与 OCI 返回 401 是两回事，但对"这份凭据还能不能
+		// 用"这个问题的答案是同一个：不能用。所以照样计入连续失败。
+		s.applyAccountHealth(ctx, acc.ID, *result)
+		return result
 	}
 
 	result := accountsvc.CheckClient(ctx, client)
@@ -242,6 +280,7 @@ func (s *Server) checkAccount(ctx context.Context, acc *store.Account) *accounts
 		message = strings.TrimSpace(result.ErrorCode + " " + result.ErrorText)
 	}
 	_ = s.st.SetAccountStatus(ctx, acc.ID, status, message)
+	s.applyAccountHealth(ctx, acc.ID, result)
 
 	// 顺手把探测到的身份信息存下来。订阅区域尤其关键：跨账号同步靠它
 	// 决定要去哪些区域拉实例——没有这份清单就只能盲扫三十多个区域，
@@ -429,7 +468,8 @@ func (s *Server) handleExportAudit(w http.ResponseWriter, r *http.Request) {
 	err := s.st.EachAudit(r.Context(), filter, func(e store.AuditEntry) error {
 		return cw.Write([]string{
 			e.CreatedAt.Format("2006-01-02 15:04:05"),
-			e.Action, e.AccountID, e.Target, e.Detail, e.IP, e.Result,
+			csvCell(e.Action), csvCell(e.AccountID), csvCell(e.Target),
+			csvCell(e.Detail), csvCell(e.IP), csvCell(e.Result),
 		})
 	})
 	cw.Flush()
@@ -448,29 +488,41 @@ func (s *Server) handleListRegions(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"regions": ociclient.KnownRegions()})
 }
 
+// csvCell 中和 CSV 公式注入。
+//
+// 表格软件会把以 = + - @ 开头的单元格当公式执行，而审计日志里有些字段
+// 是外部可控的——最典型的是登录失败时的 Target：它直接取自请求体里的
+// 用户名，**未认证即可写入任意字符串**。攻击者留一行 `=cmd|'/c calc'!A0`，
+// 管理员导出 CSV 用 Excel 打开就中招。
+//
+// 加前导单引号是这类导出的通用做法：Excel / LibreOffice / WPS 都按文本
+// 处理，肉眼可见的差别只是一个引号。制表符与回车同样要挡——它们能把
+// 一个单元格拆成两行，让"目标资源"这一列伪造出别的行。
+func csvCell(v string) string {
+	if v == "" {
+		return v
+	}
+	switch v[0] {
+	case '=', '+', '-', '@', '\t', '\r':
+		return "'" + v
+	}
+	return v
+}
+
 // ---- 共用助手 ----
 
 // writeAccountInputError 把账号写入失败归类为"用户填错了"还是"系统问题"。
+//
+// 分类依据是 store.InvalidError 这个类型，不是错误文案。早先用「错误串里不含
+// store: 前缀」来猜，任何一处忘了加前缀的内部错误都会被当成 400 并原样回显——
+// SQL 细节泄露给了前端，真正的故障还被伪装成"你填错了"。默认分支走 500 且
+// 只回一句通用文案，内部错误只进日志。
 func (s *Server) writeAccountInputError(w http.ResponseWriter, err error) {
-	switch {
-	case isValidationError(err):
+	if store.IsInvalid(err) {
 		writeError(w, http.StatusBadRequest, "invalid_input", err.Error())
-	default:
-		writeStoreError(w, err)
+		return
 	}
-}
-
-// isValidationError 判断错误是否来自输入校验。
-// store 层的校验错误都是 errors.New / fmt.Errorf 构造的普通错误，
-// 与 ErrNotFound / ErrConflict 这两个哨兵值区分开即可。
-func isValidationError(err error) bool {
-	if err == nil {
-		return false
-	}
-	if strings.Contains(err.Error(), "store: ") {
-		return false
-	}
-	return true
+	writeStoreError(w, err)
 }
 
 // writeOCIError 把 OCI 调用失败转成响应，保留原始错误码与处理建议。

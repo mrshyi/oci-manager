@@ -1,5 +1,5 @@
 <script setup lang="ts">
-/** §4.8 设置：账户安全 / 操作策略 / 外观 / 审计日志 / 关于 */
+/** §4.8 设置：账户安全 / 操作策略 / 云侧策略 / 域名联动 / 外观 / 审计日志 / 运行日志 / 备份与恢复 / 关于 */
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useStore } from '@/store'
@@ -12,13 +12,17 @@ import PageTabs from '@/components/PageTabs.vue'
 import SwitchRow from '@/components/SwitchRow.vue'
 import KeyValueList from '@/components/KeyValueList.vue'
 import EmptyState from '@/components/EmptyState.vue'
+import LogStream from '@/components/LogStream.vue'
+import BackupPanel from '@/components/BackupPanel.vue'
+import CloudflarePanel from '@/components/CloudflarePanel.vue'
+import PolicyTemplate from '@/components/PolicyTemplate.vue'
 import SkeletonRows from '@/components/SkeletonRows.vue'
 import QrCode from '@/components/QrCode.vue'
 import { actionLabel, auditTarget } from '@/lib/audit'
 
 const router = useRouter()
 const { state, ask, toast, toastError, updateOptions, logout } = useStore()
-const TABS = ['账户安全', '操作策略', '外观', '审计日志', '关于']
+const TABS = ['账户安全', '操作策略', '云侧策略', '域名联动', '外观', '审计日志', '运行日志', '备份与恢复', '关于']
 const active = ref('账户安全')
 
 /* ---------- 账户安全 ---------- */
@@ -535,6 +539,8 @@ watch(active, tab => { if (tab === '审计日志') void loadAudit() })
       </div>
     </SectionCard>
 
+    <PolicyTemplate v-else-if="active === '云侧策略'" />
+
     <template v-else-if="active === '外观'">
       <SectionCard title="主题与密度">
         <SwitchRow :model-value="state.theme === 'dark'" title="深色主题" sub="暗色是默认，Light 完整对等"
@@ -592,6 +598,12 @@ watch(active, tab => { if (tab === '审计日志') void loadAudit() })
         </div>
       </template>
     </SectionCard>
+
+    <LogStream v-else-if="active === '运行日志'" />
+
+    <CloudflarePanel v-else-if="active === '域名联动'" />
+
+    <BackupPanel v-else-if="active === '备份与恢复'" />
 
     <SectionCard v-else title="关于">
       <KeyValueList :items="aboutItems" />

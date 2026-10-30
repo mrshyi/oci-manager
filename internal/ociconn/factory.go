@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"ocicore/internal/ociclient"
+	"ocicore/internal/riskguard"
 	"ocicore/internal/store"
 )
 
@@ -30,6 +31,16 @@ type Factory struct {
 	// limiter 由所有账号的客户端共享，是唯一能拦住跨账号并发总量的地方。
 	// 各操作内部的信号量只管自己那次操作的扇出，管不住彼此叠加。
 	limiter *ociclient.Limiter
+
+	// guard 统计每账号的调用量，供任务层降频。可为 nil（不统计）。
+	//
+	// 只在建客户端时读取，所以必须在服务开始接请求之前挂上，
+	// 否则先建好的那批客户端不会计数。
+	guard *riskguard.Guard
+
+	// endpoint 覆盖端点解析，仅供测试把客户端指向一个冒充 OCI 的本地服务端。
+	// 生产路径保持 nil，走 ociclient.Endpoint。
+	endpoint func(ociclient.Service, string) string
 }
 
 type cacheEntry struct {
@@ -47,6 +58,23 @@ func New(st *store.Store) *Factory {
 		limiter: ociclient.NewLimiter(ociclient.DefaultGlobalConcurrency),
 	}
 }
+
+// SetEndpointResolver 覆盖端点解析。
+//
+// 只为测试而存在：权限自检这类功能的验收需要"某族返回 403、其余正常"的
+// 服务端行为，真实账号上没法反复构造。与 SetRiskGuard 一样，必须在建客户端
+// 之前调用——已经缓存下来的客户端不会补挂。
+func (f *Factory) SetEndpointResolver(fn func(ociclient.Service, string) string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.endpoint = fn
+}
+
+// SetRiskGuard 挂上调用预算守卫。
+//
+// 必须在服务开始接请求之前调用：已经建好并缓存下来的客户端不会补挂回调，
+// 那批账号在缓存失效前不计数。放在启动流程里（New 之后、Listen 之前）即可。
+func (f *Factory) SetRiskGuard(g *riskguard.Guard) { f.guard = g }
 
 // For 返回某账号的客户端。账号自上次建连后被修改过就会重建。
 func (f *Factory) For(ctx context.Context, acc *store.Account) (*ociclient.Client, error) {
@@ -97,6 +125,22 @@ func (f *Factory) build(ctx context.Context, acc *store.Account) (*ociclient.Cli
 	}
 
 	opts := []ociclient.Option{ociclient.WithLimiter(f.limiter)}
+	if f.endpoint != nil {
+		opts = append(opts, ociclient.WithEndpointResolver(f.endpoint))
+	}
+
+	// 预算计数：账号 ID 用闭包捕获，客户端不需要知道本地账号是谁。
+	if f.guard != nil {
+		accountID := acc.ID
+		guard := f.guard
+		opts = append(opts, ociclient.WithCallObserver(func() {
+			// 每次调用都新起一个带超时的 context：计数是旁路统计，
+			// 不能让它的耗时拖住真正那次 API 调用。
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			guard.Record(ctx, accountID)
+		}))
+	}
 
 	proxyURL, err := f.proxyFor(ctx, acc)
 	if err != nil {

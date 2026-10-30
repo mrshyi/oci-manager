@@ -46,6 +46,9 @@ type Result struct {
 	ErrorCode string `json:"errorCode,omitempty"`
 	ErrorText string `json:"errorText,omitempty"`
 	Advice    string `json:"advice,omitempty"`
+	// ErrorClass 是 ociclient.Class 的名字（AuthFailed / Throttled / …）。
+	// 健康度按它上色，前端也可以据此把"等一会儿会好"和"必须去控制台"分开。
+	ErrorClass string `json:"errorClass,omitempty"`
 	// AccountFatal 表示这是凭据本身的问题，账号应被标记为异常。
 	AccountFatal bool `json:"accountFatal"`
 }
@@ -247,9 +250,12 @@ func fillError(res *Result, err error) {
 		}
 		res.ErrorText = apiErr.Message
 		res.Advice = apiErr.Advice()
+		res.ErrorClass = apiErr.Class.String()
 		res.AccountFatal = apiErr.Class.AccountFatal()
 		return
 	}
+	// 非 API 错误（DNS、TLS、超时）没有 Class 可言。留空即表示"未分类"，
+	// 健康度会按"其余 → 绿"处理，这与事实相符：网络问题不代表账号有问题。
 	res.ErrorText = err.Error()
 }
 

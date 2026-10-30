@@ -1,9 +1,11 @@
 package huntsvc
 
 import (
+	"context"
 	"testing"
 	"time"
 
+	"ocicore/internal/riskguard"
 	"ocicore/internal/store"
 )
 
@@ -153,5 +155,65 @@ func TestBuildLaunchRequestOmitsShapeConfigForFixedShapes(t *testing.T) {
 	req := buildLaunchRequest("c", "AD-1", "s", "t", Spec{Shape: "VM.Standard.E2.1.Micro"})
 	if req.ShapeConfig != nil {
 		t.Errorf("固定规格不该带 ShapeConfig，实际 %+v", req.ShapeConfig)
+	}
+}
+
+// TestDelayForScalesWithBudget 确认超预算后间隔按倍数拉长。
+//
+// 预算的降频必须落在任务层而不是传输层：传输层阻塞会把一次用户点击变成
+// 转圈十几秒的请求，用户会重试，重试又增加调用量——想压低的那个数字反而
+// 被自己推高了。拉长间隔的观感只是「慢」，慢不会被重试。
+func TestDelayForScalesWithBudget(t *testing.T) {
+	const interval = 60
+	task := &store.HuntTask{IntervalSeconds: interval, AccountID: "acc-1"}
+
+	// 未超预算：与不接预算时完全一致。
+	free := New(Deps{Budget: riskguard.New(nil, riskguard.WithLimit(10))})
+	for i := 0; i < 30; i++ {
+		d := free.delayFor(context.Background(), task)
+		// 60s ±20%
+		if d < 48*time.Second || d > 72*time.Second {
+			t.Fatalf("未超预算时间隔 %v 超出 [48s, 72s]", d)
+		}
+	}
+
+	// 用满预算 → 倍数 2。
+	used := riskguard.New(nil, riskguard.WithLimit(2))
+	used.Record(context.Background(), "acc-1")
+	used.Record(context.Background(), "acc-1")
+	twice := New(Deps{Budget: used})
+	for i := 0; i < 30; i++ {
+		d := twice.delayFor(context.Background(), task)
+		// 120s ±20%
+		if d < 96*time.Second || d > 144*time.Second {
+			t.Fatalf("超预算后间隔 %v 超出 [96s, 144s]——降频没生效", d)
+		}
+	}
+
+	// 两倍预算以上 → 倍数 4。
+	for i := 0; i < 4; i++ {
+		used.Record(context.Background(), "acc-1")
+	}
+	for i := 0; i < 30; i++ {
+		d := twice.delayFor(context.Background(), task)
+		// 240s ±20%
+		if d < 192*time.Second || d > 288*time.Second {
+			t.Fatalf("超两倍预算后间隔 %v 超出 [192s, 288s]", d)
+		}
+	}
+}
+
+// TestDelayForWithoutBudgetMatchesNextDelay 确认不接预算时行为不变。
+//
+// 这是 P0-3 对抢机路径的唯一影响面：一旦降频算错，只要不注入 Budget
+// 就应该回到改动前的样子，给线上留一条只摘依赖的回退路径。
+func TestDelayForWithoutBudgetMatchesNextDelay(t *testing.T) {
+	s := New(Deps{})
+	task := &store.HuntTask{IntervalSeconds: 60, Attempts: 0}
+	for i := 0; i < 30; i++ {
+		got := s.delayFor(context.Background(), task)
+		if got < 48*time.Second || got > 72*time.Second {
+			t.Fatalf("无预算时间隔 %v 超出 [48s, 72s]", got)
+		}
 	}
 }

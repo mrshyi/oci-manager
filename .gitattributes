@@ -28,3 +28,13 @@
 # 前端构建产物：diff 没有阅读价值，折叠起来
 internal/web/dist/** linguist-generated=true -diff
 web/package-lock.json -diff
+
+# 前端构建产物在合并时一律保留本分支的版本。
+#
+# 这里的每个 chunk 文件名都带内容哈希，两边各跑一次构建就会得到两套完全
+# 不同的文件名，合并时表现为成片的 rename/rename 与 rename/delete 冲突——
+# 全是噪音，没有一条需要人工判断。真正该做的是合并完重新构建一次。
+#
+# merge=ours 需要本地有 `git config merge.ours.driver true`（见
+# docs/分支策略.md）。没配也不会出错，只是退化回普通文本合并。
+internal/web/dist/** merge=ours

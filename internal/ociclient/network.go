@@ -246,7 +246,8 @@ func (c *Client) CreateVcn(ctx context.Context, region string, req CreateVcnRequ
 	var out Vcn
 	_, err := c.Do(ctx, Request{
 		Method: http.MethodPost, Service: ServiceCore, Path: "/vcns",
-		Region: region, Body: req,
+		Idempotent: true,
+		Region:     region, Body: req,
 	}, &out)
 	if err != nil {
 		return nil, err
@@ -274,9 +275,10 @@ func (c *Client) GetVcn(ctx context.Context, region, vcnID string) (*Vcn, error)
 func (c *Client) AddVcnIpv6Cidr(ctx context.Context, region, vcnID string) error {
 	_, err := c.Do(ctx, Request{
 		Method: http.MethodPost, Service: ServiceCore,
-		Path:   "/vcns/" + url.PathEscape(vcnID) + "/actions/addIpv6Cidr",
-		Region: region,
-		Body:   map[string]any{"isOracleGuaAllocationEnabled": true},
+		Idempotent: true,
+		Path:       "/vcns/" + url.PathEscape(vcnID) + "/actions/addIpv6Cidr",
+		Region:     region,
+		Body:       map[string]any{"isOracleGuaAllocationEnabled": true},
 	}, nil)
 	return err
 }
@@ -336,7 +338,8 @@ func (c *Client) CreateSubnet(ctx context.Context, region string, req CreateSubn
 	var out Subnet
 	_, err := c.Do(ctx, Request{
 		Method: http.MethodPost, Service: ServiceCore, Path: "/subnets",
-		Region: region, Body: req,
+		Idempotent: true,
+		Region:     region, Body: req,
 	}, &out)
 	if err != nil {
 		return nil, err
@@ -353,8 +356,9 @@ func (c *Client) AddSubnetIpv6Cidr(ctx context.Context, region, subnetID, ipv6Ci
 	}
 	_, err := c.Do(ctx, Request{
 		Method: http.MethodPost, Service: ServiceCore,
-		Path:   "/subnets/" + url.PathEscape(subnetID) + "/actions/addIpv6Cidr",
-		Region: region, Body: body,
+		Idempotent: true,
+		Path:       "/subnets/" + url.PathEscape(subnetID) + "/actions/addIpv6Cidr",
+		Region:     region, Body: body,
 	}, nil)
 	return err
 }
@@ -402,7 +406,8 @@ func (c *Client) CreateInternetGateway(ctx context.Context, region, compartmentI
 	var out InternetGateway
 	_, err := c.Do(ctx, Request{
 		Method: http.MethodPost, Service: ServiceCore, Path: "/internetGateways",
-		Region: region,
+		Idempotent: true,
+		Region:     region,
 		Body: map[string]any{
 			"compartmentId": compartmentID,
 			"vcnId":         vcnID,
@@ -622,7 +627,8 @@ func (c *Client) CreatePublicIP(ctx context.Context, region, compartmentID, life
 	var out PublicIP
 	_, err := c.Do(ctx, Request{
 		Method: http.MethodPost, Service: ServiceCore, Path: "/publicIps",
-		Region: region, Body: body,
+		Idempotent: true,
+		Region:     region, Body: body,
 	}, &out)
 	if err != nil {
 		return nil, err
@@ -674,7 +680,8 @@ func (c *Client) CreateIpv6(ctx context.Context, region, vnicID string) (*Ipv6, 
 	var out Ipv6
 	_, err := c.Do(ctx, Request{
 		Method: http.MethodPost, Service: ServiceCore, Path: "/ipv6",
-		Region: region, Body: map[string]any{"vnicId": vnicID},
+		Idempotent: true,
+		Region:     region, Body: map[string]any{"vnicId": vnicID},
 	}, &out)
 	if err != nil {
 		return nil, err

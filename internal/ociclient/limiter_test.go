@@ -71,7 +71,7 @@ func TestLimiterCapsConcurrency(t *testing.T) {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				_, _ = c.attempt(context.Background(), http.MethodGet, srv.URL, nil, nil)
+				_, _ = c.attempt(context.Background(), http.MethodGet, srv.URL, nil, nil, "")
 			}()
 		}
 	}
@@ -106,7 +106,7 @@ func TestTenancyCapIsPerClient(t *testing.T) {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				_, _ = c.attempt(context.Background(), http.MethodGet, srv.URL, nil, nil)
+				_, _ = c.attempt(context.Background(), http.MethodGet, srv.URL, nil, nil, "")
 			}()
 		}
 	}
@@ -134,13 +134,13 @@ func TestLimiterRespectsContext(t *testing.T) {
 	c := newLimitedClient(t, srv, limiter, 1)
 
 	// 先占住唯一的名额。
-	go func() { _, _ = c.attempt(context.Background(), http.MethodGet, srv.URL, nil, nil) }()
+	go func() { _, _ = c.attempt(context.Background(), http.MethodGet, srv.URL, nil, nil, "") }()
 	time.Sleep(30 * time.Millisecond)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		_, err := c.attempt(ctx, http.MethodGet, srv.URL, nil, nil)
+		_, err := c.attempt(ctx, http.MethodGet, srv.URL, nil, nil, "")
 		done <- err
 	}()
 

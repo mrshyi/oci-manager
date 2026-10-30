@@ -3,11 +3,13 @@ package notify
 import (
 	"context"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"ocicore/internal/store"
 )
@@ -102,11 +104,39 @@ func TestDialControlChecksResolvedIP(t *testing.T) {
 
 // R3：通知客户端不走环境代理。经代理时目标由代理端解析，拨号阶段的 IP 校验看不到它。
 func TestNotifyClientIgnoresEnvironmentProxy(t *testing.T) {
-	tr, ok := newHTTPClient(nil).Transport.(*http.Transport)
+	tr, ok := newHTTPClient(&egressGuard{}).Transport.(*http.Transport)
 	if !ok {
 		t.Fatal("Transport 类型异常")
 	}
 	if tr.Proxy != nil {
 		t.Error("通知客户端不应使用环境代理")
+	}
+}
+
+// 邮件渠道必须与 HTTP 渠道共用同一条出网边界。
+//
+// 以前 SMTP 用的是裸 net.Dialer：HTTP 渠道守住了，邮件渠道却可以把面板指向
+// 127.0.0.1:25 或内网主机，再把对方返回的横幅带回界面。同一份威胁模型不能
+// 只保护一半路径。
+func TestSendMailBlocksLoopback(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+
+	host, port, err := net.SplitHostPort(ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	// 端口上是真在监听的：只有边界生效，拨号才会在 connect 之前被拒绝。
+	err = sendMail(ctx, &egressGuard{}, host, port, SecurityAuto, nil,
+		"a@x", []string{"b@x"}, []byte("x"))
+	if !errors.Is(err, ErrEgressBlocked) {
+		t.Errorf("err = %v，期望被出网边界拦下（%v）", err, ErrEgressBlocked)
 	}
 }

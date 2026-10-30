@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -14,6 +15,7 @@ import (
 
 	"ocicore/internal/jobsvc"
 	"ocicore/internal/ociclient"
+	"ocicore/internal/opssvc"
 	"ocicore/internal/store"
 )
 
@@ -337,11 +339,94 @@ type bulkResult struct {
 	Error      string `json:"error,omitempty"`
 }
 
-// maxBulkSize 限制单次批量操作的规模。
+// maxBulkSize 是同步执行的上限。
 //
-// 上限的意义不在于性能，而在于防呆：一次误选把三十台机器全关掉
-// 的代价太大，超过这个数应当分批执行并逐批确认。
+// 上限的意义不在于性能，而在于防呆：一次误选把三十台机器全关掉的代价太大。
+// 超过这个数不再直接拒绝，而是转成 ops_tasks 后台逐个执行——既保留防呆，
+// 又不会因为「太多了」把正常的大批量运维挡在门外。
 const maxBulkSize = 20
+
+// maxBulkTaskSize 是单个批量任务的上限。
+//
+// 200 台按每轮 5 台算约 40 轮，几分钟内能跑完；再往上就该分批提交，否则
+// 中途失败时"到底改了哪几台"很难核对。
+const maxBulkTaskSize = 200
+
+// bulkTaskMinutes 是批量任务的默认总时限。
+const bulkTaskMinutes = 30
+
+// bulkConfirmThreshold 是触发确认词的台数门槛。
+//
+// 取 5 是因为 1–4 台通常是「点着看」的规模，误选的代价肉眼可辨；从 5 台起
+// 列表开始需要滚动，选中状态在视口外，误选很难被发现。
+const bulkConfirmThreshold = 5
+
+// bulkCrossAccountWord 是跨账号批量操作要求的确认词。
+const bulkCrossAccountWord = "ALL"
+
+// bulkConfirmScope 汇总一批实例涉及哪些账号（去重）。
+//
+// 查不到的实例直接跳过：本地库尚未同步到的新实例本来就查不到，把它当成
+// 异常只会让正常用法也被拦住。
+func (s *Server) bulkConfirmScope(ctx context.Context, ids []string) []string {
+	seen := make(map[string]struct{}, len(ids))
+	aliases := make([]string, 0, len(ids))
+	for _, id := range ids {
+		inst, err := s.st.GetInstance(ctx, id)
+		if err != nil {
+			continue
+		}
+		acc, err := s.st.GetAccount(ctx, inst.AccountID)
+		if err != nil {
+			continue
+		}
+		if _, ok := seen[acc.Alias]; ok {
+			continue
+		}
+		seen[acc.Alias] = struct{}{}
+		aliases = append(aliases, acc.Alias)
+	}
+	return aliases
+}
+
+// requireBulkConfirm 判定批量操作是否需要回传确认词。
+//
+// 台数一律用请求体里的 instanceIds 长度，不读任何前端传来的 count 字段——
+// 那等于让被约束方自己申报该受多大约束。
+//
+// 查不到所属账号的实例（本地库还没同步到）不单独升级门槛：新建实例在下次
+// 同步前就是查不到的，为这个要求 ALL 会把正常用法也挡住。它只在批量够大、
+// 又恰好一个别名都算不出来时才退化成 ALL——那时确实没有任何可用于确认的词。
+func (s *Server) requireBulkConfirm(w http.ResponseWriter, r *http.Request, ids []string) bool {
+	aliases := s.bulkConfirmScope(r.Context(), ids)
+
+	need := ""
+	reason := ""
+	switch {
+	case len(aliases) >= 2:
+		need = bulkCrossAccountWord
+		reason = "这批实例分属 " + itoa(len(aliases)) + " 个账号（" +
+			strings.Join(aliases, "、") + "）"
+	case len(ids) >= bulkConfirmThreshold:
+		reason = "这次操作会同时影响 " + itoa(len(ids)) + " 台实例"
+		if len(aliases) == 1 {
+			need = aliases[0]
+		} else {
+			need = bulkCrossAccountWord
+			reason += "，且无法确定它们所属的账号"
+		}
+	}
+	if need == "" {
+		return true
+	}
+
+	if strings.TrimSpace(r.URL.Query().Get("confirm")) == need {
+		return true
+	}
+	writeError(w, http.StatusBadRequest, "confirm_required",
+		reason+"。如确认执行，请在 confirm 参数中回传 "+strconv.Quote(need))
+	return false
+}
 
 // handleBulkAction 批量执行开关机。
 //
@@ -376,13 +461,25 @@ func (s *Server) handleBulkAction(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "empty_selection", "没有选中任何实例")
 		return
 	}
-	if len(req.InstanceIDs) > maxBulkSize {
+	if len(req.InstanceIDs) > maxBulkTaskSize {
 		writeError(w, http.StatusBadRequest, "too_many",
-			"单次批量操作最多 "+itoa(maxBulkSize)+" 台，请分批执行")
+			"单次批量最多 "+itoa(maxBulkTaskSize)+" 台，请分批提交")
+		return
+	}
+	// 规模与范围的门槛放在 TOTP 之前：先让用户确认「这一下会影响多少台」，
+	// 再要验证码。反过来的话，用户输完验证码才被告知还要回传确认词，
+	// 就得再输一次验证码（同一个 30 秒窗口未必还在）。
+	if !s.requireBulkConfirm(w, r, req.InstanceIDs) {
 		return
 	}
 	// 批量开机不会丢数据也不会断业务，其余批量动作一次波及多台机器，算危险操作。
 	if action != "START" && !s.requireDangerTOTP(w, r) {
+		return
+	}
+	// 超过同步上限就转成后台任务：HTTP 请求不该挂在那儿等几十次串行调用，
+	// 而且转成任务后进度可查、进程重启也能接着跑。
+	if len(req.InstanceIDs) > maxBulkSize {
+		s.createBulkTasks(w, r, req.InstanceIDs, action)
 		return
 	}
 
@@ -477,7 +574,118 @@ func (s *Server) handleBulkAction(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// createBulkTasks 把超过同步上限的批量操作拆成按账号的运维任务。
+//
+// 为什么按账号拆：ops_tasks.account_id 是单值且有外键，而每台实例的凭据都
+// 挂在它自己的账号上。硬塞进一行会让"这个任务用谁的凭据"变得没有答案。
+func (s *Server) createBulkTasks(w http.ResponseWriter, r *http.Request, ids []string, action string) {
+	// 去重。同一个实例出现两次会让第二遍撞上「实例正在转换中」，
+	// 用户看到一条莫名其妙的失败，还会以为批量只成功了一半。
+	seen := make(map[string]struct{}, len(ids))
+	unique := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		unique = append(unique, id)
+	}
+
+	groups := make(map[string][]string, 4)
+	order := make([]string, 0, 4)
+	var unknown []string
+	for _, id := range unique {
+		inst, err := s.st.GetInstance(r.Context(), id)
+		if err != nil {
+			unknown = append(unknown, id)
+			continue
+		}
+		if _, ok := groups[inst.AccountID]; !ok {
+			order = append(order, inst.AccountID)
+		}
+		groups[inst.AccountID] = append(groups[inst.AccountID], id)
+	}
+	if len(unknown) > 0 {
+		// 静默跳过比报错更糟：用户以为 25 台都关了，实际有几台根本没被处理。
+		shown := unknown
+		if len(shown) > 5 {
+			shown = shown[:5]
+		}
+		writeError(w, http.StatusBadRequest, "unknown_instance",
+			"有 "+itoa(len(unknown))+" 台实例不在本地库中（可能尚未同步），"+
+				"请先同步实例列表再批量操作："+strings.Join(shown, "、"))
+		return
+	}
+
+	aliases := s.accountAliases(r.Context())
+	deadline := time.Now().Add(bulkTaskMinutes * time.Minute)
+	tasks := make([]opsTaskDTO, 0, len(order))
+	for _, accountID := range order {
+		list := groups[accountID]
+		spec, err := opssvc.EncodeBulkSpec(opssvc.BulkSpec{Action: action, InstanceIDs: list})
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		// 每轮 BulkChunkSize 台，留一倍余量给重试。
+		chunks := (len(list) + opssvc.BulkChunkSize - 1) / opssvc.BulkChunkSize
+		alias := aliases[accountID]
+		if alias == "" {
+			alias = accountID
+		}
+		task, err := s.st.CreateOpsTask(r.Context(), store.OpsTask{
+			Kind:        store.OpsKindBulk,
+			AccountID:   accountID,
+			Name:        "批量" + bulkActionLabel(action) + "：" + alias + " " + itoa(len(list)) + " 台",
+			Spec:        spec,
+			MaxAttempts: chunks*2 + 5,
+			ExpiresAt:   deadline,
+		})
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		tasks = append(tasks, toOpsDTO(*task, aliases))
+	}
+
+	user := userFrom(r.Context())
+	_ = s.st.Audit(r.Context(), store.AuditEntry{
+		UserID: user.ID, Action: "instance_bulk_task_" + strings.ToLower(action),
+		Target: itoa(len(unique)) + " 台实例",
+		Detail: "拆成 " + itoa(len(tasks)) + " 个后台任务", IP: s.clientIP(r),
+	})
+	writeJSON(w, http.StatusAccepted, map[string]any{
+		"tasks": tasks,
+		"notice": "超过 " + itoa(maxBulkSize) + " 台，已转为后台任务逐个执行：" +
+			"每 " + itoa(opssvc.BulkChunkSize) + " 台一轮，可在任务页查看进度；" +
+			"进程重启后会接着跑。失败的那几台可以点「重试」只重试它们。",
+	})
+}
+
+// bulkActionLabel 是动作的中文名，用于任务标题。
+func bulkActionLabel(action string) string {
+	switch action {
+	case ociclient.ActionStart:
+		return "开机"
+	case ociclient.ActionSoftStop:
+		return "关机"
+	case ociclient.ActionStop:
+		return "强制关机"
+	case ociclient.ActionSoftReset:
+		return "重启"
+	case ociclient.ActionReset:
+		return "强制重启"
+	default:
+		return action
+	}
+}
+
 // bulkVerb 是批量操作在任务标题里的说法。
+//
+// 与 bulkActionLabel 并存是合并上游 v0.5.x 的过渡状态：两者服务不同的
+// 任务系统——bulkActionLabel 给 opssvc 的 ops_tasks 用（超过同步上限的
+// 批量），bulkVerb 给 jobsvc 用（同步上限内、异步执行并推进度）。
+// 等任务入口统一后收敛成一个，现在不能删任何一个。
 func bulkVerb(action string) string {
 	switch action {
 	case ociclient.ActionStart:

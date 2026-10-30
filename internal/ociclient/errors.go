@@ -222,3 +222,21 @@ func IsAccountFatal(err error) bool {
 	apiErr, ok := AsAPIError(err)
 	return ok && apiErr.Class.AccountFatal()
 }
+
+// IsNotFound 判断错误是否为 404。
+//
+// 清理流程里到处都要问这个问题：资源可能已经被用户在控制台手工删掉了，
+// 这时候当成失败会让人以为清理没做完。
+func IsNotFound(err error) bool {
+	apiErr, ok := AsAPIError(err)
+	return ok && apiErr.StatusCode == http.StatusNotFound
+}
+
+// IsConflict 判断错误是否为 409。
+//
+// 删除一个正在删除中的资源、或者在过渡态改配置，OCI 都会返回 409。对幂等
+// 流程来说「已经这样了」通常等于成功。
+func IsConflict(err error) bool {
+	apiErr, ok := AsAPIError(err)
+	return ok && apiErr.StatusCode == http.StatusConflict
+}

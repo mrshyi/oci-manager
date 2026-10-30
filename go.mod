@@ -3,6 +3,7 @@ module ocicore
 go 1.26
 
 require (
+	github.com/oschwald/maxminddb-golang v1.13.1
 	golang.org/x/crypto v0.45.0
 	modernc.org/sqlite v1.40.1
 )

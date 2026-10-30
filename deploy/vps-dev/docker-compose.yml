@@ -1,0 +1,55 @@
+# dev 分支的验收实例。
+#
+# 与同一台机器上的生产实例（/opt/ocicore，ghcr.io/jsongmax/oci-core:0.4.14，
+# 容器名 ocicore，127.0.0.1:8080）刻意完全隔离：
+#   - 不同目录、不同容器名、不同镜像名
+#   - 不同数据卷（从生产卷复制一份，不是共享）
+#   - 不同端口（8081）
+#
+# 共享数据卷会让两个进程同时写同一个 SQLite：WAL 下虽然能读，但写会互锁，
+# 更麻烦的是 dev 版启动时跑的迁移会改生产库的表结构。
+#
+# 访问方式（面板持有所有甲骨文账号的私钥，不能挂公网）：
+#     ssh -L 8081:127.0.0.1:8081 root@<vps>
+#   然后本机浏览器打开 http://127.0.0.1:8081
+services:
+  ocicore-dev:
+    image: ocicore:dev
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ocicore-dev
+    restart: unless-stopped
+
+    ports:
+      - "127.0.0.1:8081:8080"
+
+    environment:
+      OCICORE_ADDR: "0.0.0.0:8080"
+      OCICORE_DATA_DIR: "/app/data"
+      TZ: "Asia/Shanghai"
+      OCICORE_SESSION_TTL: "12h"
+
+    volumes:
+      # 独立卷。里面是生产卷的副本，验收时能看到同样的账号数据。
+      - ocicore-dev-data:/app/data
+
+    # 日志上限。这台机器只剩不到 900MB，json-file 驱动默认无限增长，
+    # 一个跑几十天的面板足以把根分区写满，连带影响同机的其他容器。
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "2"
+
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  ocicore-dev-data:
+    # external + 显式命名：这个卷是手动创建并从生产卷复制出来的，不属于
+    # compose 的生命周期。标成 external 有两个好处——
+    #   1. compose 不会尝试创建它（否则每次 up 都报「已存在但不是它建的」）
+    #   2. docker compose down -v 不会把它删掉，里面的 master.key 丢不起
+    external: true
+    name: ocicore-dev-data

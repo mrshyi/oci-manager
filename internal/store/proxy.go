@@ -308,7 +308,7 @@ func (s *Store) LegacyProxyURL(ctx context.Context, accountID string) (string, e
 func (s *Store) adoptProxyURL(ctx context.Context, raw, label, accountID string) (id string, created bool, err error) {
 	parsed, err := proxypool.ParseLine(raw)
 	if err != nil {
-		return "", false, errors.New("代理地址无效，支持 host:port、host:port:user:pass、scheme://user:pass@host:port")
+		return "", false, Invalidf("代理地址无效，支持 host:port、host:port:user:pass、scheme://user:pass@host:port")
 	}
 	if parsed.Label == "" {
 		parsed.Label = label

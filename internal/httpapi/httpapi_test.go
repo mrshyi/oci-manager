@@ -20,8 +20,10 @@ import (
 	"ocicore/internal/config"
 	"ocicore/internal/cryptobox"
 	"ocicore/internal/instancesvc"
+	"ocicore/internal/logstream"
 	"ocicore/internal/ociclient"
 	"ocicore/internal/ociconn"
+	"ocicore/internal/riskguard"
 	"ocicore/internal/store"
 )
 
@@ -31,8 +33,18 @@ type harness struct {
 	srv    *httptest.Server
 	client *http.Client
 	store  *store.Store
+	// api 留给需要直接调用服务端方法的测试（例如脱离 HTTP 层验证
+	// requireNamedConfirm 这类只在特定前置条件下才走到的判定）。
+	api *Server
+	// budget 是调用预算，测试要能从外面灌调用次数。
+	budget *riskguard.Guard
 	// bus 留给 SSE 测试：要验证推流是活的，就得能从外面推一条事件进去。
 	bus *instancesvc.Bus
+	// logs 是进程日志的环形缓冲。测试直接往里推条目，模拟"刚才发生过什么"。
+	logs *logstream.Ring
+	// box 是私钥加密盒。备份测试要在另一个路径上重新打开库，
+	// 必须用同一把主密钥。
+	box *cryptobox.Box
 }
 
 func newHarness(t *testing.T) *harness {
@@ -46,7 +58,9 @@ func newHarness(t *testing.T) *harness {
 	if err != nil {
 		t.Fatal(err)
 	}
-	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"), box)
+	// 数据目录同时给备份接口用（DBPath / MasterKeyPath 都基于它算）。
+	dataDir := t.TempDir()
+	st, err := store.Open(filepath.Join(dataDir, "oci-tools.db"), box)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -54,11 +68,15 @@ func newHarness(t *testing.T) *harness {
 
 	conns := ociconn.New(st)
 	bus := instancesvc.NewBus()
+	logs := logstream.NewRing(64)
+	budget := riskguard.New(store.NewRiskBudgetCounter(st))
 	api := New(Deps{
 		Store:     st,
-		Config:    config.Config{SessionTTL: time.Hour},
+		Config:    config.Config{SessionTTL: time.Hour, DataDir: dataDir},
 		Conns:     conns,
 		Instances: instancesvc.New(st, conns, bus),
+		Budget:    budget,
+		Logs:      logs,
 	})
 	// 后台任务可能在测试结束时还在写库，先等它们跑完再关库。
 	t.Cleanup(api.jobs.Wait)
@@ -69,7 +87,10 @@ func newHarness(t *testing.T) *harness {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &harness{t: t, srv: srv, store: st, client: &http.Client{Jar: jar}, bus: bus}
+	return &harness{
+		t: t, srv: srv, store: st, client: &http.Client{Jar: jar},
+		api: api, budget: budget, bus: bus, logs: logs, box: box,
+	}
 }
 
 // do 发起请求并自动带上 CSRF 头。withCSRF 为 false 时用于测试防护本身。

@@ -10,6 +10,7 @@ import { insights, hunt as huntApi, type AuditEntryDTO, type HuntTaskDTO } from 
 import { now } from '@/lib/clock'
 import QuotaMeter from '@/components/QuotaMeter.vue'
 import SectionCard from '@/components/SectionCard.vue'
+import IPMapPanel from '@/components/IPMapPanel.vue'
 import LoadingBar from '@/components/LoadingBar.vue'
 
 const router = useRouter()
@@ -365,6 +366,8 @@ const timeline = computed(() =>
       </SectionCard>
     </div>
     </template>
+
+    <IPMapPanel />
 
   </div>
 </template>

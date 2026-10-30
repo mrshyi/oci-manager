@@ -145,6 +145,8 @@ const sendTimeout = 15 * time.Second
 type Dispatcher struct {
 	st     *store.Store
 	client *http.Client
+	// egress 是出网边界，HTTP 与 SMTP 两条路径共用同一份放行网段。
+	egress *egressGuard
 }
 
 // Option 调整分发器的行为。
@@ -159,15 +161,17 @@ func WithAllowedNets(nets []netip.Prefix) Option {
 	return func(o *dispatcherOptions) { o.allowedNets = append(o.allowedNets, nets...) }
 }
 
-// NewDispatcher 创建分发器。HTTP 类渠道默认不能访问回环、内网与链路本地地址。
+// NewDispatcher 创建分发器。HTTP 与邮件类渠道默认都不能访问回环、内网与链路本地地址。
 func NewDispatcher(st *store.Store, opts ...Option) *Dispatcher {
 	var o dispatcherOptions
 	for _, opt := range opts {
 		opt(&o)
 	}
+	g := &egressGuard{allowed: o.allowedNets}
 	return &Dispatcher{
 		st:     st,
-		client: newHTTPClient(o.allowedNets),
+		client: newHTTPClient(g),
+		egress: g,
 	}
 }
 
@@ -386,7 +390,7 @@ func (d *Dispatcher) sendEmail(ctx context.Context, cfg map[string]string, msg M
 	if security == SecurityAuto && port == smtpsPort {
 		security = SecuritySSL
 	}
-	return sendMail(ctx, host, port, security, auth, from, recipients, body.Bytes())
+	return sendMail(ctx, d.egress, host, port, security, auth, from, recipients, body.Bytes())
 }
 
 // 邮件渠道的加密方式，对应配置里的 security 字段。
@@ -407,17 +411,26 @@ const smtpsPort = "465"
 //
 // smtp.SendMail 既不认 ctx 也没有超时；对 465 端口用明文连接时，
 // 服务器等 TLS 握手、客户端等问候语，会永久互等。
-func sendMail(ctx context.Context, host, port, security string, auth smtp.Auth, from string, to []string, msg []byte) error {
+//
+// g 是出网边界，与 HTTP 渠道共用：SMTP 同样是"把请求发往用户填写的地址"，
+// 不设边界的话一条邮件渠道就能让面板去连 127.0.0.1:25 或内网主机。
+// 传 nil 表示不限（仅测试用）。
+func sendMail(ctx context.Context, g *egressGuard, host, port, security string, auth smtp.Auth, from string, to []string, msg []byte) error {
 	implicitTLS := security == SecuritySSL
 	addr := net.JoinHostPort(host, port)
 	tlsConfig := &tls.Config{ServerName: host}
 
+	dialer := &net.Dialer{Timeout: 10 * time.Second}
+	if g != nil {
+		dialer = g.dialer(10 * time.Second)
+	}
+
 	var conn net.Conn
 	var err error
 	if implicitTLS {
-		conn, err = (&tls.Dialer{Config: tlsConfig}).DialContext(ctx, "tcp", addr)
+		conn, err = (&tls.Dialer{Config: tlsConfig, NetDialer: dialer}).DialContext(ctx, "tcp", addr)
 	} else {
-		conn, err = (&net.Dialer{}).DialContext(ctx, "tcp", addr)
+		conn, err = dialer.DialContext(ctx, "tcp", addr)
 	}
 	if err != nil {
 		return err

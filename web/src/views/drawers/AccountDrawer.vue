@@ -1,5 +1,5 @@
 <script setup lang="ts">
-/** §4.3.2 账号详情抽屉（720）：概览 / 区域订阅 / 配额 / 权限自检 / 密钥 */
+/** §4.3.2 账号详情抽屉（720）：概览 / 区域订阅 / 配额 / 计费风险 / 权限自检 / 密钥 */
 import { computed, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { useStore } from '@/store'
@@ -19,6 +19,7 @@ import KeyValueList from '@/components/KeyValueList.vue'
 import CheckList from '@/components/CheckList.vue'
 import CodeBlock from '@/components/CodeBlock.vue'
 import QuotaMeter from '@/components/QuotaMeter.vue'
+import BillingRiskPanel from '@/components/BillingRiskPanel.vue'
 import SkeletonRows from '@/components/SkeletonRows.vue'
 import CredentialField from '@/components/CredentialField.vue'
 
@@ -108,7 +109,7 @@ const permissionChecks = computed<CheckItem[]>(() => {
   return items
 })
 
-const TABS = ['概览', '区域订阅', '配额', '权限自检', '登录策略', '密钥']
+const TABS = ['概览', '区域订阅', '配额', '计费风险', '权限自检', '登录策略', '密钥']
 
 /* ---------- 登录策略（身份域密码有效期） ---------- */
 
@@ -442,6 +443,10 @@ function askDelete() {
             每多查一个区域就要多发八个跨洋请求，默认不拉。
           </div>
         </SectionCard>
+      </template>
+
+      <template v-else-if="active === '计费风险'">
+        <BillingRiskPanel :id="account.id" />
       </template>
 
       <template v-else-if="active === '权限自检'">

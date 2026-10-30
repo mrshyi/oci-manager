@@ -329,11 +329,12 @@ func (c *Client) AttachBootVolume(ctx context.Context, region, instanceID, bootV
 
 	var out BootVolumeAttachment
 	_, err := c.Do(ctx, Request{
-		Method:  http.MethodPost,
-		Service: ServiceCore,
-		Path:    "/bootVolumeAttachments",
-		Region:  region,
-		Body:    body,
+		Method:     http.MethodPost,
+		Idempotent: true,
+		Service:    ServiceCore,
+		Path:       "/bootVolumeAttachments",
+		Region:     region,
+		Body:       body,
 	}, &out)
 	if err != nil {
 		return nil, err
@@ -372,11 +373,12 @@ func (c *Client) AttachVolume(ctx context.Context, region, instanceID, volumeID,
 
 	var out VolumeAttachment
 	_, err := c.Do(ctx, Request{
-		Method:  http.MethodPost,
-		Service: ServiceCore,
-		Path:    "/volumeAttachments",
-		Region:  region,
-		Body:    body,
+		Method:     http.MethodPost,
+		Idempotent: true,
+		Service:    ServiceCore,
+		Path:       "/volumeAttachments",
+		Region:     region,
+		Body:       body,
 	}, &out)
 	if err != nil {
 		return nil, err

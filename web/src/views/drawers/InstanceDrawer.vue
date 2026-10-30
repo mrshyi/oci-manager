@@ -1,5 +1,5 @@
 <script setup lang="ts">
-/** §4.4.3 实例详情抽屉（720）：概览 / 网络 / 存储 / 监控 / 控制台 / 操作记录 */
+/** §4.4.3 实例详情抽屉（720）：概览 / 网络 / 存储 / 监控 / 控制台 / 运维 / 操作记录 */
 import { computed, defineAsyncComponent, onMounted, reactive, ref, watch } from 'vue'
 import { useStore } from '@/store'
 import { isTransitional } from '@/lib/lifecycle'
@@ -17,6 +17,7 @@ import DrawerHeader from '@/components/DrawerHeader.vue'
 import DrawerTabs from '@/components/DrawerTabs.vue'
 import DrawerBody from '@/components/DrawerBody.vue'
 import SectionCard from '@/components/SectionCard.vue'
+import InstanceOpsPanel from '@/components/InstanceOpsPanel.vue'
 import KeyValueList from '@/components/KeyValueList.vue'
 import CheckList from '@/components/CheckList.vue'
 import CodeBlock from '@/components/CodeBlock.vue'
@@ -41,7 +42,7 @@ const runningJobs = computed(() => activeJobsFor(props.id))
 // 任务结束后详情（网卡、IP、配置）可能变了，重拉一次。
 watch(() => runningJobs.value.length, (n, old) => { if (n < old) void loadDetail() })
 
-const TABS = ['概览', '网络', '存储', '监控', '控制台', '操作记录']
+const TABS = ['概览', '网络', '存储', '监控', '控制台', '运维', '操作记录']
 const active = ref(props.tab && TABS.includes(props.tab) ? props.tab : '概览')
 
 const inst = computed(() => state.instances.find(i => i.id === props.id))
@@ -1106,6 +1107,11 @@ watch(metricHours, () => void loadMetrics())
             <CodeBlock copyable :code="consoleResult.vncConsoleCommand" />
           </SectionCard>
         </template>
+      </template>
+
+      <template v-else-if="active === '运维'">
+        <!-- 运维任务跑在后台，这里只负责创建；进度在侧栏「运维任务」页 -->
+        <InstanceOpsPanel v-if="inst" :instance="inst" />
       </template>
 
       <template v-else>

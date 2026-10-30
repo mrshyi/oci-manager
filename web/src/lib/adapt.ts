@@ -5,8 +5,11 @@
  * 这类可直接渲染的文本。格式化属于视图层的职责，因此集中在这里，
  * 而不是让后端返回预格式化的字符串。
  */
-import type { AccountDTO, AccountQuotaDTO, InstanceDTO } from '@/api/types'
-import type { Account, AccountColorIndex, AccountStatus, AccountTier, Instance, OsFamily, Quota } from '@/types'
+import type { AccountDTO, AccountQuotaDTO, CapabilityProbeDTO, InstanceDTO } from '@/api/types'
+import type {
+  Account, AccountColorIndex, AccountStatus, AccountTier,
+  CapabilityProbe, Instance, OsFamily, Quota
+} from '@/types'
 import { now } from '@/lib/clock'
 
 /** 相对时间：3 分钟前 / 2 小时前 / 5 天前。 */
@@ -217,7 +220,48 @@ export function toAccount(dto: AccountDTO, quota?: AccountQuotaDTO): Account {
     fingerprint: dto.fingerprint,
     quota: toQuota(quota),
     quotaRegion: quota?.region ?? '',
-    createdAt: dateText(dto.createdAt)
+    createdAt: dateText(dto.createdAt),
+    tags: dto.tags ?? [],
+    group: dto.meta?.groupName ?? '',
+    note: dto.meta?.note ?? '',
+    expiresAt: dto.meta?.expiresAt ?? null,
+    expiryDays: dto.expiryDays ?? null,
+    sortWeight: dto.meta?.sortWeight ?? 0,
+    // 后端没给 health 时按"尚未校验"处理。不能默认成正常——
+    // 那等于向用户保证一件没人验证过的事。
+    health: dto.health?.level ?? 'unknown',
+    healthFailures: dto.health?.consecutiveFailures ?? 0,
+    healthErrorClass: dto.health?.lastErrorClass ?? '',
+    healthErrorAt: dto.health?.lastErrorAt ?? null,
+    healthOkAt: dto.health?.lastOkAt ?? null,
+    healthAdvice: dto.health?.advice ?? '',
+    capability: toCapability(dto.capability)
+  }
+}
+
+/**
+ * 把权限自检结果转成视图模型。
+ *
+ * 没自检过时返回 null 而不是空对象：界面上「没查过」和「查了，五项全挂」
+ * 是两种完全不同的状态，前者该显示一个按钮，后者该显示一片红点。
+ */
+function toCapability(dto: CapabilityProbeDTO | null | undefined): CapabilityProbe | null {
+  if (!dto || !dto.items?.length) return null
+  return {
+    region: dto.region,
+    probedAt: dto.probedAt,
+    summary: dto.summary,
+    items: dto.items.map(c => ({
+      key: c.key,
+      label: c.label,
+      ok: c.ok,
+      denied: c.denied,
+      class: c.class ?? '',
+      detail: c.detail ?? '',
+      policy: c.policy ?? '',
+      count: c.count ?? 0,
+      durationMs: c.durationMs ?? 0
+    }))
   }
 }
 

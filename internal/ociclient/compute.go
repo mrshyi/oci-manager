@@ -353,11 +353,12 @@ func (c *Client) LaunchInstance(ctx context.Context, region string, req LaunchIn
 	}
 	var out Instance
 	_, err := c.Do(ctx, Request{
-		Method:  http.MethodPost,
-		Service: ServiceCore,
-		Path:    "/instances",
-		Region:  region,
-		Body:    req,
+		Method:     http.MethodPost,
+		Idempotent: true,
+		Service:    ServiceCore,
+		Path:       "/instances",
+		Region:     region,
+		Body:       req,
 	}, &out)
 	if err != nil {
 		return nil, err
@@ -506,11 +507,12 @@ func (c *Client) AttachVnic(ctx context.Context, region, instanceID string, deta
 	}
 	var out VnicAttachment
 	_, err := c.Do(ctx, Request{
-		Method:  http.MethodPost,
-		Service: ServiceCore,
-		Path:    "/vnicAttachments",
-		Region:  region,
-		Body:    body,
+		Method:     http.MethodPost,
+		Idempotent: true,
+		Service:    ServiceCore,
+		Path:       "/vnicAttachments",
+		Region:     region,
+		Body:       body,
 	}, &out)
 	if err != nil {
 		return nil, err
@@ -594,7 +596,8 @@ func (c *Client) CreateConsoleConnection(ctx context.Context, region, compartmen
 	var out InstanceConsoleConnection
 	_, err := c.Do(ctx, Request{
 		Method: http.MethodPost, Service: ServiceCore,
-		Path: "/instanceConsoleConnections", Region: region,
+		Idempotent: true,
+		Path:       "/instanceConsoleConnections", Region: region,
 		Body: map[string]any{
 			"instanceId":    instanceID,
 			"compartmentId": compartmentID,

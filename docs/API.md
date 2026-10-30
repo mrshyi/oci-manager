@@ -194,7 +194,7 @@ X-OCI-Tools: 1
     "availabilityDomain": "xxxx:AP-TOKYO-1-AD-1", "faultDomain": "FAULT-DOMAIN-1",
     "shape": "VM.Standard.A1.Flex", "ocpus": 4, "memoryGb": 24, "baselineOcpuUtilization": "",
     "lifecycleState": "RUNNING", "imageOs": "Canonical Ubuntu",
-    "publicIp": "152.70.14.208", "privateIp": "10.0.0.5",
+    "publicIp": "203.0.113.10", "privateIp": "10.0.0.5",
     "ipv6": "2001:db8::10,2001:db8::11", "bootVolumeGb": 50, "bootVolumeVpus": 10,
     "timeCreated": "…", "syncedAt": "…", "lastError": "",
     "accountAlias": "东京主号", "accountCode": "TYO", "accountColorIndex": 1

@@ -1,4 +1,4 @@
-import { computed, reactive, readonly, watch } from 'vue'
+import { computed, reactive, readonly, ref, watch } from 'vue'
 import type {
   Account, ConfirmRequest, DrawerRequest, Instance, LifecycleState, ToastPayload
 } from '@/types'
@@ -85,6 +85,13 @@ const state = reactive({
 
   accounts: [] as Account[],
   instances: [] as Instance[],
+  /**
+   * 分组展示顺序，由后端排好（组内最高权重降序，未分组固定最后）。
+   * 前端不重算：这条规则只该有一份，否则两个地方迟早会不一致。
+   */
+  groups: [] as string[],
+  /** 筛选器与输入联想用的标签清单，按使用次数降序 */
+  tagUsage: [] as { tag: string; count: number }[],
   /** 后台任务，最新的在前。进度由 SSE 的 job.updated 推送 */
   jobs: [] as JobDTO[],
   /** 任务列表是否拉到过一次。任务页据此区分「还在读」与「真的没有任务」 */
@@ -124,7 +131,13 @@ const PLACEHOLDER_ACCOUNT: Account = {
     unlimited: { ocpu: false, mem: false, block: false, micro: false }
   },
   quotaRegion: '',
-  createdAt: ''
+  createdAt: '',
+  tags: [], group: '', note: '', expiresAt: null, expiryDays: null, sortWeight: 0,
+  // 占位账号没有健康度可言。unknown 而不是 green——不能凭空保证它是好的。
+  health: 'unknown', healthFailures: 0, healthErrorClass: '',
+  healthErrorAt: null, healthOkAt: null, healthAdvice: '',
+  // 没自检过就是 null，不是"五项全挂"——两者在界面上完全不同。
+  capability: null
 }
 
 const accountById = (id: string): Account =>
@@ -299,8 +312,10 @@ async function loadStatus(): Promise<void> {
  * 现在列表先渲染，配额自己追上来。
  */
 async function loadAccounts(): Promise<void> {
-  const { accounts: dtos } = await accountsApi.list()
+  const { accounts: dtos, groups, tags } = await accountsApi.list()
   state.accounts = dtos.map(dto => toAccount(dto, undefined))
+  state.groups = groups ?? []
+  state.tagUsage = tags ?? []
 
   // 首次加载时默认全选，之后保留用户的选择，但要剔除已删除的账号。
   const known = new Set(state.accounts.map(a => a.id))
@@ -313,6 +328,99 @@ async function loadAccounts(): Promise<void> {
   }
 
   void loadQuota()
+}
+
+/**
+ * 保存账号的整理信息：标签 + 分组 / 备注 / 到期 / 权重。
+ *
+ * 两个接口一起发，但只在最后重拉一次列表。分成两次重拉的话，第二次
+ * 请求回来之前界面会短暂显示「标签更新了、分组还是旧的」——而用户刚
+ * 点完保存，正是最盯着这一行的时候。
+ *
+ * 重拉而不是就地改 state：标签会影响标签清单、筛选器计数和分组顺序，
+ * 就地改要同步四处，漏一处就出现「标签改了但筛选器还是旧的」。账号是
+ * 十几个的量级，重拉一次比维护增量更新划算。
+ */
+async function saveAccountOrganize(
+  id: string,
+  input: {
+    tags: string[]
+    groupName: string
+    note: string
+    expiresAt: string | null
+    sortWeight: number
+  }
+): Promise<boolean> {
+  try {
+    await Promise.all([
+      accountsApi.setTags(id, input.tags),
+      accountsApi.setMeta(id, {
+        groupName: input.groupName,
+        note: input.note,
+        expiresAt: input.expiresAt,
+        sortWeight: input.sortWeight
+      })
+    ])
+    await loadAccounts()
+    return true
+  } catch (err) {
+    toastError('保存失败', err)
+    return false
+  }
+}
+
+/**
+ * 正在做权限自检的账号 ID。同一时刻只允许一个——
+ * 自检要打五次 OCI，让用户连点十个账号就是在制造一次小规模突发。
+ */
+const probingAccount = ref<string | null>(null)
+
+/**
+ * 跑一次权限自检。
+ *
+ * 结果直接并进 state.accounts，不重拉整个列表：账号列表还带着标签、
+ * 分组、健康度，为一个自检结果重拉一遍是多余的往返。
+ */
+async function runCapabilityProbe(id: string): Promise<void> {
+  if (probingAccount.value) return
+  probingAccount.value = id
+  try {
+    const { probe } = await accountsApi.runCapabilityProbe(id)
+    const acc = state.accounts.find(a => a.id === id)
+    if (acc) {
+      acc.capability = probe
+        ? {
+            region: probe.region,
+            probedAt: probe.probedAt,
+            summary: probe.summary,
+            items: probe.items.map(c => ({
+              key: c.key, label: c.label, ok: c.ok, denied: c.denied,
+              class: c.class ?? '', detail: c.detail ?? '', policy: c.policy ?? '',
+              count: c.count ?? 0, durationMs: c.durationMs ?? 0
+            }))
+          }
+        : null
+    }
+  } catch (err) {
+    toastError('权限自检失败', err)
+  } finally {
+    probingAccount.value = null
+  }
+}
+
+/**
+ * 清除一个账号的健康度记录，红块随之消失。
+ *
+ * 只重拉账号列表：健康度是账号列表的一部分，没有别的视图依赖它。
+ * 不是永久静音——下次校验若仍失败，红块会重新出现。
+ */
+async function clearAccountHealth(id: string): Promise<void> {
+  try {
+    await accountsApi.clearHealth(id)
+    await loadAccounts()
+  } catch (err) {
+    toastError('清除失败', err)
+  }
 }
 
 /** 把配额并进已渲染的账号里。失败就保持"未知"，不打扰用户。 */
@@ -771,17 +879,42 @@ async function terminate(id: string, preserveBootVolume = false): Promise<void> 
 /**
  * 批量操作。交给后端的批量接口在后台任务里执行：并发度在服务端压到 3，
  * 任务会等每台都落定，结果在任务列表里逐台可查。
+ *
+ * 这里自己按 BULK_BATCH 台一批切开，而不是一次全塞给后端。原因是后端在
+ * 超过 20 台时会把批量拆成 ops_tasks 返回 `{tasks}`，而任务页读的是
+ * jobsvc 的 `/api/jobs` —— 那条路径创建的任务在界面上根本看不到，前端还会
+ * 因为解构不到 `job` 而误报「批量操作失败」（任务其实已经在跑了）。
+ *
+ * 切批之后每批都在 20 台以内，一律走 jobsvc，进度都能在任务页里看到。
+ * 批次是并发提交的：jobsvc 自己有 maxConcurrent=4 的闸门，多出来的排队，
+ * 不会因为一次点 200 台就把账号打进限流。
  */
+const BULK_BATCH = 20
+
 async function bulk(action: 'start' | 'stop' | 'restart'): Promise<void> {
   const ids = [...state.selection]
   if (ids.length === 0) return
   const op: InstanceAction = action === 'start' ? 'START' : action === 'stop' ? 'SOFTSTOP' : 'SOFTRESET'
-  try {
-    const { job } = await instancesApi.bulk(ids, op)
-    state.selection.clear()
-    trackJob(job)
-  } catch (err) {
-    toastError('批量操作失败', err)
+  state.selection.clear()
+
+  const batches: string[][] = []
+  for (let i = 0; i < ids.length; i += BULK_BATCH) batches.push(ids.slice(i, i + BULK_BATCH))
+
+  const results = await Promise.allSettled(batches.map((b) => instancesApi.bulk(b, op)))
+
+  let failed = 0
+  for (const r of results) {
+    if (r.status === 'fulfilled') {
+      trackJob(r.value.job)
+    } else {
+      failed++
+    }
+  }
+  // 只在第一个失败时提示，否则 10 批全挂会连弹 10 个一模一样的 toast。
+  if (failed > 0) {
+    const first = results.find((r) => r.status === 'rejected')
+    const reason = first && first.status === 'rejected' ? first.reason : new Error('没有返回原因')
+    toastError(`批量操作有 ${failed} 批没能提交`, reason)
   }
 }
 
@@ -925,6 +1058,8 @@ export function useStore() {
     toast, toastError, dismissToast, ask, openDrawer, closeDrawer, markIpChanged,
 
     loadAll, loadAccounts, loadInstances, refreshInstances, loadStatus, syncNow,
+    saveAccountOrganize, clearAccountHealth,
+    runCapabilityProbe, probingAccount,
     startLiveUpdates, stopLiveUpdates,
 
     trackJob, cancelJob, removeJob, clearFinishedJobs, loadJobs, activeJobCount, activeJobsFor,

@@ -205,7 +205,8 @@ func TestSendMailImplicitTLSStartsHandshake(t *testing.T) {
 	host, port, _ := net.SplitHostPort(ln.Addr().String())
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	_ = sendMail(ctx, host, port, SecuritySSL, nil, "a@x", []string{"b@x"}, []byte("x"))
+	// 这些用例针对的是 TLS/协议行为，对端是回环地址，故不挂出网边界（传 nil）。
+	_ = sendMail(ctx, nil, host, port, SecuritySSL, nil, "a@x", []string{"b@x"}, []byte("x"))
 
 	select {
 	case b := <-first:
@@ -239,7 +240,7 @@ func TestSendMailHonorsContextWhenServerSilent(t *testing.T) {
 	defer cancel()
 
 	start := time.Now()
-	err = sendMail(ctx, host, port, SecurityAuto, nil, "a@x", []string{"b@x"}, []byte("x"))
+	err = sendMail(ctx, nil, host, port, SecurityAuto, nil, "a@x", []string{"b@x"}, []byte("x"))
 	if err == nil {
 		t.Fatal("服务器不响应时应当报错")
 	}
@@ -284,7 +285,7 @@ func TestSendMailRequiredStartTLSRejectsPlainServer(t *testing.T) {
 	host, port, _ := net.SplitHostPort(ln.Addr().String())
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	err = sendMail(ctx, host, port, SecurityStartTLS, nil, "a@x", []string{"b@x"}, []byte("x"))
+	err = sendMail(ctx, nil, host, port, SecurityStartTLS, nil, "a@x", []string{"b@x"}, []byte("x"))
 	if err == nil || !strings.Contains(err.Error(), "STARTTLS") {
 		t.Errorf("err = %v, 期望提示不支持 STARTTLS", err)
 	}

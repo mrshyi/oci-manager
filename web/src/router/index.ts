@@ -12,6 +12,8 @@ const router = createRouter({
     { path: '/instances', name: 'instances', component: () => import('@/views/InstancesView.vue'), meta: { title: '实例' } },
     { path: '/network', name: 'network', component: () => import('@/views/NetworkView.vue'), meta: { title: '网络' } },
     { path: '/jobs', name: 'jobs', component: () => import('@/views/JobsView.vue'), meta: { title: '任务' } },
+    // 运维任务（opssvc）与上面的任务（jobsvc）是两套系统，见 OpsTasksView 的说明
+    { path: '/ops-tasks', name: 'ops-tasks', component: () => import('@/views/OpsTasksView.vue'), meta: { title: '运维任务' } },
     { path: '/hunt', name: 'hunt', component: () => import('@/views/HuntView.vue'), meta: { title: '容量守候' } },
     { path: '/capacity', name: 'capacity', component: () => import('@/views/CapacityView.vue'), meta: { title: '容量监控' } },
     { path: '/storage', name: 'storage', component: () => import('@/views/StorageView.vue'), meta: { title: '存储' } },

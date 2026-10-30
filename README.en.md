@@ -287,9 +287,12 @@ The volume holds `master.key` and the encrypted database. **You need both**:
 - Database only → the private keys are ciphertext you cannot decrypt
 - Key only → no data
 
-Worse, a missing `master.key` produces **no error**: a fresh random key is generated,
-the service starts normally, you can still log in, the account list is still there —
-but every account fails the moment you use it, permanently.
+A missing `master.key` while the database still holds encrypted data is now a **hard
+startup failure**: the service refuses to run and tells you how to restore the key.
+That is deliberate — generating a fresh key would silently orphan every stored
+private key, and the new key would occupy the very path you might still recover the
+old one from. If you are certain there is nothing to keep, set
+`OCICORE_ALLOW_NEW_MASTER_KEY=true` to allow generating a new key anyway.
 
 Back up the whole data directory:
 
@@ -388,6 +391,7 @@ All via environment variables.
 | `OCICORE_ADDR` | `127.0.0.1:8080` | Listen address. **Must be `0.0.0.0:8080` inside a container** |
 | `OCICORE_DATA_DIR` | `./data` | Database and master key directory |
 | `OCICORE_MASTER_KEY` | empty | Hex master key; falls back to `$DATA_DIR/master.key` |
+| `OCICORE_ALLOW_NEW_MASTER_KEY` | `false` | When the database already holds encrypted data but `master.key` is missing, startup is refused. Set to `true` only after confirming there is nothing to keep — the new key makes existing ciphertext permanently unreadable |
 | `OCICORE_STATIC_DIR` | empty | Frontend asset directory; takes precedence over embedded assets (development) |
 | `OCICORE_SESSION_TTL` | `12h` | Session lifetime, sliding renewal |
 | `OCICORE_TRUST_PROXY` | `false` | Whether to trust `X-Forwarded-*`. **Only enable behind a real reverse proxy** |

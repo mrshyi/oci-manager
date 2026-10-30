@@ -36,6 +36,109 @@ export interface TotpSetupDTO {
   uri: string
 }
 
+/** 账号的附加信息：分组、备注、到期时间、排序权重 */
+export interface AccountMetaDTO {
+  accountId: string
+  /** 空串表示未分组，前端归到最后一组 */
+  groupName: string
+  note: string
+  /** 到期时间（ISO）。null 表示不设提醒 */
+  expiresAt: string | null
+  /** 大的排前面。全为 0 时退回创建时间顺序 */
+  sortWeight: number
+  /** 抢机页的「已知悉」标记，当前只做存取 */
+  huntAckAt: string | null
+  updatedAt: string
+}
+
+/**
+ * 账号健康度：最近一次校验的结论。
+ *
+ * level 由后端算好，前端不自己判颜色——「连续几次算坏」「哪种错误算红」
+ * 这类规则只该有一份。
+ */
+export interface AccountHealthDTO {
+  accountId: string
+  /** 最近一次成功。null 表示从来没成功过 */
+  lastOkAt: string | null
+  /** 最近一次失败的分类名（AuthFailed / Throttled / QuotaExceeded …） */
+  lastErrorClass: string
+  /** 最后一次失败的时刻。成功不清空，它是历史事实 */
+  lastErrorAt: string | null
+  lastErrorMessage: string
+  /** 连续凭据类失败次数。非凭据类结果会把它归零 */
+  consecutiveFailures: number
+  /** 已确认凭据不可用（连续失败达到阈值） */
+  fatal: boolean
+  updatedAt: string
+  /** unknown / green / yellow / orange / red */
+  level: HealthLevelDTO
+  label: string
+  /** 面向用户的一句话说明。红块写「凭据或权限异常，请到控制台确认账号状态」 */
+  advice: string
+}
+
+export type HealthLevelDTO = 'unknown' | 'green' | 'yellow' | 'orange' | 'red'
+
+/** 一族能力的探测结论 */
+export interface CapabilityDTO {
+  /** compute / network / storage / usage / monitoring */
+  key: string
+  label: string
+  /** 接口调通了、拿到了数据 */
+  ok: boolean
+  /** 不可用的原因是缺权限。与「接口报错」必须分开：前者去加策略，后者重试可能就好 */
+  denied: boolean
+  class?: string
+  detail?: string
+  /** 缺权限时该补的 IAM 策略 */
+  policy?: string
+  /** 探测到的资源数量，只有 compute / network / storage 有意义 */
+  count: number
+  durationMs: number
+}
+
+/** 一次权限自检的结果 */
+export interface CapabilityProbeDTO {
+  accountId: string
+  region: string
+  probedAt: string
+  items: CapabilityDTO[]
+  /** 一句话结论，列表页直接显示 */
+  summary: string
+}
+
+/** 五族的静态描述。由后端下发，前端不自己维护清单 */
+export interface CapabilitySpecDTO {
+  key: string
+  label: string
+  policy: string
+}
+
+/** GET/POST /api/accounts/{id}/capability-probe 的响应 */
+export interface CapabilityProbeResponseDTO {
+  /** 没自检过时为 null */
+  probe: CapabilityProbeDTO | null
+  notice?: string
+  /** 只在没自检过时下发 */
+  specs?: CapabilitySpecDTO[]
+}
+
+/** 一个标签及其被多少个账号使用 */
+export interface TagUsageDTO {
+  tag: string
+  count: number
+}
+
+/** GET /api/accounts 的完整响应 */
+export interface AccountsResponseDTO {
+  accounts: AccountDTO[]
+  /** 分组展示顺序，未分组（空串）固定最后。由后端排好，前端不重算 */
+  groups: string[]
+  /** 筛选器与输入联想用的标签清单，按使用次数降序 */
+  tags: TagUsageDTO[]
+}
+
 export interface AccountDTO {
   id: string
   alias: string
@@ -63,6 +166,15 @@ export interface AccountDTO {
   tenancyName: string
   createdAt: string
   updatedAt: string
+  /** 自由文本标签，按字母序。没有标签时是空数组 */
+  tags: string[]
+  meta: AccountMetaDTO
+  /** 健康度色块，由后端算好 */
+  health: AccountHealthDTO
+  /** 上次权限自检的结果。null 表示还没自检过 */
+  capability: CapabilityProbeDTO | null
+  /** 距离到期的天数：负数已过期，0 表示今天，null 表示不设到期 */
+  expiryDays: number | null
 }
 
 export interface InstanceDTO {
@@ -152,6 +264,8 @@ export interface CheckResultDTO {
   errorCode?: string
   errorText?: string
   advice?: string
+  /** ociclient.Class 的名字，健康度据此上色 */
+  errorClass?: string
   accountFatal: boolean
 }
 
@@ -846,6 +960,190 @@ export interface PasswordPolicyResultDTO {
   notice: string
 }
 
+/* ---------- 计费风险 ---------- */
+
+/** 一条计费风险。severity 只有两级：在扣钱 / 需要看一眼 */
+export interface BillingRiskItemDTO {
+  key: string
+  label: string
+  severity: 'billing' | 'attention'
+  detail: string
+  /** 估算的每日费用（人民币）。0 表示估不出或确实免费 */
+  estDailyCny: number
+  /** 估算依据，必须原样显示——「估算」不能只写在标题里 */
+  basis: string
+  /** 额度数字是否来自账号自己的 limits 接口。false 时不能说「你超额了」 */
+  confirmed: boolean
+  notice?: string
+}
+
+export interface BillingRiskDTO {
+  accountId: string
+  region: string
+  generatedAt: string
+  items: BillingRiskItemDTO[]
+  totalDailyCny: number
+  totalMonthlyCny: number
+  notice: string
+}
+
+/* ---------- 备份与恢复 ---------- */
+
+export interface BackupManifestDTO {
+  createdAt: string
+  appVersion: string
+  backupVersion: number
+  dbBytes: number
+  dbSha256: string
+  /** 包里是否带了主密钥。默认不带——它该和数据库分开保管 */
+  includesMasterKey: boolean
+  notice: string
+}
+
+export interface BackupStatusDTO {
+  /** 是否有等待生效的恢复（需要重启） */
+  pending: boolean
+  /** 当前程序支持的备份格式版本 */
+  backupVersion: number
+  manifest?: BackupManifestDTO
+  stagedAt?: string
+  masterKeyPending?: boolean
+}
+
+export interface RestoreResultDTO {
+  manifest: BackupManifestDTO
+  /** 恒为 true：库文件被进程打开着，恢复只能在重启时生效 */
+  requiresRestart: boolean
+  /** 备份里的主密钥与当前不同 */
+  masterKeyDiffers: boolean
+  notice: string
+}
+
+/* ---------- 云侧策略模板 ---------- */
+
+export interface PolicyLineDTO {
+  /** 可直接粘贴的完整语句，占位符已替换 */
+  text: string
+  /** 这条为什么需要 */
+  purpose: string
+  /** 覆盖的能力探测族 */
+  capabilities: string[]
+}
+
+export interface PolicyTemplateDTO {
+  group: string
+  /** 8 条拼好的全文 */
+  text: string
+  lines: PolicyLineDTO[]
+  steps: string[]
+  scope: string
+  notice: string
+  version: string
+  readOnlyCount: number
+}
+
+/* ---------- Cloudflare 联动 ---------- */
+
+export interface CFZoneDTO {
+  id: string
+  /** 可选归属账号，只用于筛选 */
+  accountId: string
+  zoneId: string
+  zoneName: string
+  /** 只说明有没有配 token，不含内容 */
+  hasToken: boolean
+  enabled: boolean
+  /** 最后一次**成功**同步的时刻；失败不推进 */
+  lastSyncAt: string
+  lastError: string
+  createdAt: string
+  updatedAt: string
+}
+
+export interface CFRecordDTO {
+  id: string
+  zonePk: string
+  recordId: string
+  name: string
+  type: string
+  proxied: boolean
+  ttl: number
+  accountId: string
+  instanceId: string
+  lastIp: string
+  lastSyncAt: string
+  lastError: string
+  createdAt: string
+  updatedAt: string
+  /** 列表查询顺带带出，方便直接显示 */
+  zoneName: string
+}
+
+export interface CFListDTO {
+  zones: CFZoneDTO[]
+  records: CFRecordDTO[]
+  /** 面板上常驻的说明：只收 API Token、需要什么权限 */
+  notice: string
+}
+
+export interface CFRemoteRecordDTO {
+  id: string
+  type: string
+  name: string
+  content: string
+  ttl: number
+  proxied: boolean
+  /** 这条是否已经绑定了实例 */
+  bound: boolean
+}
+
+export interface CFSyncResultDTO {
+  /** updated / partial / failed；空表示没有绑定 */
+  status: string
+  detail: string
+  records: number
+  ip: string
+}
+
+/* ---------- IP 情报与分布 ---------- */
+
+export interface GeoStatusDTO {
+  enabled: boolean
+  /** 离线库目录。未启用时界面要把它显示出来，用户才知道该往哪放文件 */
+  dir: string
+  cityBuiltAt: string
+  hasCity: boolean
+  hasAsn: boolean
+  /** 为什么不可用、该做什么 */
+  notice: string
+}
+
+export interface GeoPointDTO {
+  instanceId: string
+  instanceName: string
+  accountId: string
+  accountCode: string
+  /** OCI 区域名，离线库查不到时用它估算位置 */
+  region: string
+  ip: string
+  found: boolean
+  country: string
+  countryCode: string
+  city: string
+  latitude: number
+  longitude: number
+  asn: string
+  org: string
+  /** mmdb（离线库）/ manual（手填）/ region（按区域估算）/ 空（查不到） */
+  source: string
+}
+
+export interface GeoDistributionDTO {
+  status: GeoStatusDTO
+  points: GeoPointDTO[]
+  notice: string
+}
+
 /* ---------- 资源页 ---------- */
 
 export interface ResourceRefDTO {
@@ -930,4 +1228,78 @@ export interface AccountResourcesDTO {
   quota: AccountQuotaDTO
   errors?: { region: string; part: string; error: string }[]
   fetchedAt: string
+}
+
+/* ---------- 运维任务（opssvc） ----------
+ *
+ * 与 JobDTO 是两套东西，刻意不合并：
+ *   JobDTO   一次性的长操作，status 只有 queued/running/succeeded/failed/cancelled
+ *   OpsTask  可重试、可暂停恢复、可能跑几十轮的任务，多出 paused、attempts、
+ *            nextAt（下次重试时刻）、dnsStatus（换 IP 顺带更新域名的结果）
+ * 把 OpsTask 硬塞进 JobDTO 会丢掉「第 3/30 轮」「下次重试还有 12 秒」这些
+ * 恰恰是用户最需要的信息，也会让 paused 无处安放。
+ */
+
+export type OpsTaskState = 'pending' | 'running' | 'paused' | 'succeeded' | 'failed' | 'canceled'
+
+export interface OpsTaskDTO {
+  id: string
+  /** change_ip_cidr / open_ports / enable_500m / rescue / bulk */
+  kind: string
+  accountId: string
+  instanceId: string
+  name: string
+  state: OpsTaskState
+  /** 分阶段任务（救援）当前停在哪一步 */
+  stage: string
+  /** 结构化进展，形状随 kind 而定 */
+  progress: Record<string, unknown>
+  attempts: number
+  maxAttempts: number
+  intervalSeconds: number
+  lastError: string
+  result: string
+  /** 换 IP 顺带更新域名的结果；空串表示这次任务不涉及 DNS */
+  dnsStatus: string
+  dnsError: string
+  expiresAt: string
+  /** 下次被调度的时刻。未命中目标网段的换 IP 任务靠它排队下一轮 */
+  nextAt: string
+  startedAt: string
+  finishedAt: string
+  createdAt: string
+  updatedAt: string
+  accountAlias: string
+  kindLabel: string
+}
+
+export interface OpsTaskListDTO {
+  tasks: OpsTaskDTO[]
+  /** 后端给的状态清单，前端不必自己维护一份 */
+  states: string[]
+}
+
+/**
+ * 创建换 IP 任务的请求。
+ *
+ * 只传 instanceId 就够了：region / vnicId / compartmentId 由后端从实例缓存
+ * 补齐。前端实例模型里本来就没有 vnicId 与 compartmentId（它们是 OCI 的内部
+ * 概念），硬要前端传会逼着把这两个字段一路透出来。
+ */
+export interface CreateChangeIPTaskInput {
+  instanceId: string
+  /** 目标网段，至少一个 */
+  targetCidrs: string[]
+  maxAttempts?: number
+  maxDurationMinutes?: number
+  /** 以下三项一般不用传，后端会从实例缓存补齐 */
+  accountId?: string
+  region?: string
+  vnicId?: string
+  compartmentId?: string
+}
+
+export interface OpsTaskAcceptedDTO {
+  task: OpsTaskDTO
+  notice: string
 }

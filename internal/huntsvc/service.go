@@ -16,15 +16,15 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"math/rand"
 	"strings"
 	"sync"
 	"time"
 
 	"ocicore/internal/netsvc"
 	"ocicore/internal/ociclient"
-	"ocicore/internal/ociconn"
+	"ocicore/internal/riskguard"
 	"ocicore/internal/store"
+	"ocicore/internal/tasksched"
 )
 
 const (
@@ -62,10 +62,23 @@ const (
 	throttleBackoff = 5 * time.Minute
 )
 
+// Connector 按账号 ID 产出 OCI 客户端。
+//
+// 只声明这里真正用到的那一个方法，而不是直接依赖 *ociconn.Factory：工厂还
+// 带着代理、缓存、限流一整套装配逻辑，抢机只关心"给我这个账号的客户端"。
+// 收窄成接口之后，端到端测试才能塞一个指向假 OCI 的实现进来，验证
+// "重复创建只产生一台实例"这条最要紧的路径。
+type Connector interface {
+	ForID(ctx context.Context, accountID string) (*ociclient.Client, *store.Account, error)
+}
+
 // Deps 是构造依赖。
 type Deps struct {
-	Store    *store.Store
-	Conns    *ociconn.Factory
+	Store *store.Store
+	Conns Connector
+	// Budget 统计每账号调用量；超预算时这里会把间隔按倍数拉长。
+	// 为 nil 表示不降频（测试与未接预算的场景）。
+	Budget   *riskguard.Guard
 	OnLaunch func(ctx context.Context, task *store.HuntTask, inst *ociclient.Instance, region, subnetID, imageID string)
 	OnEvent  func(ctx context.Context, event, title, body string)
 }
@@ -73,29 +86,65 @@ type Deps struct {
 // Service 是守候任务的调度器。
 type Service struct {
 	st       *store.Store
-	conns    *ociconn.Factory
+	conns    Connector
 	onLaunch func(context.Context, *store.HuntTask, *ociclient.Instance, string, string, string)
 	onEvent  func(context.Context, string, string, string)
 
-	// inflight 防止同一个任务被两轮 tick 同时执行。
-	// 一次尝试可能耗时数十秒（自动建网），而 tick 是 10 秒。
-	mu       sync.Mutex
-	inflight map[string]bool
+	// budget 提供「这个账号这一小时打了多少次」的答案，用来在超预算时
+	// 拉长间隔。放在任务层而不是传输层：传输层阻塞会把一次用户点击变成
+	// 转圈十几秒的请求，用户会重试，重试又增加调用量。
+	budget *riskguard.Guard
+
+	// sched 是通用的调度循环（tick / 并发闸门 / 防重复执行 / 重启错峰）。
+	// 这里只提供「一轮做什么」，不自己管循环——第二个任务类型出现时不必
+	// 再复制一遍那套逻辑。
+	sched *tasksched.Scheduler[store.HuntTask]
+
+	// mu 只保护 ipv6Ready 了。
+	mu sync.Mutex
 	// ipv6Ready 记录已经为哪个任务开通过哪个子网的 IPv6（任务 ID → 子网 ID）。
 	// 开通只需成功一次，守候却每分钟一轮，不必每轮都去读路由表和安全列表。
 	// 只存在内存里：重启后多查一遍，结果一样。
 	ipv6Ready map[string]string
 }
 
+// drainTimeout 是停机时给在跑任务留的收尾窗口。
+//
+// 一次 LaunchInstance 已经发出去了，进程立刻退出的话响应丢掉、结果没落库，
+// 用户看到"任务卡在 running"，而云端多了一台没人认领的实例。
+// 不给无限等待：一次尝试最长 4 分钟，停机不能陪着它耗。
+const drainTimeout = 5 * time.Second
+
 func New(d Deps) *Service {
-	return &Service{
+	s := &Service{
 		st:        d.Store,
 		conns:     d.Conns,
+		budget:    d.Budget,
 		onLaunch:  d.OnLaunch,
 		onEvent:   d.OnEvent,
-		inflight:  make(map[string]bool),
 		ipv6Ready: make(map[string]string),
 	}
+	s.sched = tasksched.New(tasksched.Options[store.HuntTask]{
+		Tick:    TickInterval,
+		Limit:   MaxConcurrentAttempts,
+		Stagger: tasksched.DefaultStagger,
+		Source:  huntSource{st: d.Store},
+		Handle:  func(ctx context.Context, t store.HuntTask) { s.attempt(ctx, &t) },
+		OnError: func(err error) {
+			slog.Warn("守候：读取到期任务失败", "err", err)
+		},
+	})
+	return s
+}
+
+// huntSource 把 store 的到期查询接到调度器上。
+//
+// 单独一层而不是让 store 直接实现 Source：调度器的接口描述的是"调度需要
+// 什么"，存储层不该为了满足它而改变自己的方法签名。
+type huntSource struct{ st *store.Store }
+
+func (h huntSource) Due(ctx context.Context, now time.Time, limit int) ([]store.HuntTask, error) {
+	return h.st.DueHuntTasks(ctx, now, limit)
 }
 
 // Spec 是任务快照下来的创建参数。字段与创建实例表单一一对应。
@@ -151,53 +200,17 @@ func NormalizeInterval(seconds int) int {
 }
 
 // Run 启动调度循环，直到 ctx 结束。
+//
+// 循环本体在 tasksched 里，这里只负责停机时给在跑的任务留一个收尾窗口。
 func (s *Service) Run(ctx context.Context) {
-	ticker := time.NewTicker(TickInterval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			s.tick(ctx)
+	defer func() {
+		dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), drainTimeout)
+		defer cancel()
+		if err := s.sched.Drain(dctx); err != nil {
+			slog.Warn("守候：停止时仍有任务在执行，已放弃等待", "err", err)
 		}
-	}
-}
-
-func (s *Service) tick(ctx context.Context) {
-	tasks, err := s.st.DueHuntTasks(ctx, time.Now(), MaxConcurrentAttempts)
-	if err != nil {
-		slog.Warn("守候：读取到期任务失败", "err", err)
-		return
-	}
-
-	for i := range tasks {
-		t := tasks[i]
-		if !s.claim(t.ID) {
-			continue
-		}
-		go func() {
-			defer s.release(t.ID)
-			s.attempt(ctx, &t)
-		}()
-	}
-}
-
-func (s *Service) claim(id string) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.inflight[id] {
-		return false
-	}
-	s.inflight[id] = true
-	return true
-}
-
-func (s *Service) release(id string) {
-	s.mu.Lock()
-	delete(s.inflight, id)
-	s.mu.Unlock()
+	}()
+	s.sched.Run(ctx)
 }
 
 // attempt 执行一次尝试并把结果写回任务。
@@ -291,7 +304,7 @@ func (s *Service) attempt(ctx context.Context, t *store.HuntTask) {
 		if skip, reason := s.noCapacity(ctx, client, acc, t, ad, spec); skip {
 			s.record(ctx, t, store.HuntAttempt{
 				Class: "OutOfCapacity", Error: reason, AD: ad,
-				NextAt: time.Now().Add(nextDelay(t)),
+				NextAt: time.Now().Add(s.delayFor(ctx, t)),
 			})
 			return
 		}
@@ -486,6 +499,19 @@ func (s *Service) handleLaunchError(ctx context.Context, t *store.HuntTask,
 	s.reschedule(ctx, t, name, msg, ad)
 }
 
+// huntBackoff 是抢机任务的退避阶梯。
+//
+// 阶梯本体在 tasksched 里，这里只声明「撞多少次之后慢几倍」——两个数值都
+// 是抢机特有的业务判断（撞了十次说明这个组合近期没货），不该塞进通用包。
+var huntBackoff = tasksched.Backoff{
+	Max:    maxBackoff,
+	Jitter: 0.2, // ±20%
+	Steps: []tasksched.Step{
+		{After: slowdownAfter, Factor: slowdownFactor},
+		{After: crawlAfter, Factor: crawlFactor},
+	},
+}
+
 // nextDelay 计算下一次尝试要等多久。
 //
 // 连续撞墙越久，间隔拉得越长：一个已经试了几百次的任务说明这个组合近期
@@ -493,25 +519,32 @@ func (s *Service) handleLaunchError(ctx context.Context, t *store.HuntTask,
 // 同时开火——那会形成一个尖峰，正是风控最容易注意到的形状。
 func nextDelay(t *store.HuntTask) time.Duration {
 	base := time.Duration(NormalizeInterval(t.IntervalSeconds)) * time.Second
+	return huntBackoff.Delay(base, t.Attempts)
+}
 
-	switch {
-	case t.Attempts >= crawlAfter:
-		base *= crawlFactor
-	case t.Attempts >= slowdownAfter:
-		base *= slowdownFactor
+// delayFor 在基础退避之上再乘一个预算倍数。
+//
+// 与 nextDelay 分成两层是刻意的：nextDelay 只回答「这个任务撞了多少次墙」，
+// 是任务自身的状态；预算倍数回答「这个账号这一小时整体打了多少」，是账号
+// 层面的状态。混在一起之后，nextDelay 的单测就没法只测前者了。
+//
+// 不接预算（budget 为 nil）时行为与改动前完全一致——这是 P0-3 对抢机路径
+// 唯一的影响面，一旦出问题可以只摘掉这一个依赖回退。
+func (s *Service) delayFor(ctx context.Context, t *store.HuntTask) time.Duration {
+	d := nextDelay(t)
+	if s.budget == nil {
+		return d
 	}
-	if base > maxBackoff {
-		base = maxBackoff
+	if m := s.budget.Multiplier(ctx, t.AccountID); m > 1 {
+		d *= time.Duration(m)
 	}
-
-	jitter := 1 + (rand.Float64()-0.5)*0.4 // ±20%
-	return time.Duration(float64(base) * jitter)
+	return d
 }
 
 func (s *Service) reschedule(ctx context.Context, t *store.HuntTask, class, msg, ad string) {
 	s.record(ctx, t, store.HuntAttempt{
 		Class: class, Error: msg, AD: ad,
-		NextAt: time.Now().Add(nextDelay(t)),
+		NextAt: time.Now().Add(s.delayFor(ctx, t)),
 	})
 }
 

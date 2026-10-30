@@ -92,8 +92,7 @@ func (g *egressGuard) control(_, address string, _ syscall.RawConn) error {
 }
 
 // newHTTPClient 构造带出网边界的 HTTP 客户端。
-func newHTTPClient(allowed []netip.Prefix) *http.Client {
-	g := &egressGuard{allowed: allowed}
+func newHTTPClient(g *egressGuard) *http.Client {
 	dialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second, Control: g.control}
 
 	transport := http.DefaultTransport.(*http.Transport).Clone()
@@ -114,4 +113,13 @@ func newHTTPClient(allowed []netip.Prefix) *http.Client {
 			return nil
 		},
 	}
+}
+
+// dialer 返回一个挂了出网边界的拨号器，供 SMTP 这类非 HTTP 渠道复用。
+//
+// 邮件渠道以前用的是裸 net.Dialer：HTTP 渠道守住了，SMTP 却可以把面板
+// 指向 127.0.0.1:25 或内网主机，把对方返回的横幅带回界面。同一份威胁
+// 模型不能只保护一半路径。
+func (g *egressGuard) dialer(timeout time.Duration) *net.Dialer {
+	return &net.Dialer{Timeout: timeout, Control: g.control}
 }

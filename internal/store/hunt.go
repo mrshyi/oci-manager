@@ -66,6 +66,12 @@ type HuntTask struct {
 	UpdatedAt time.Time `json:"updatedAt"`
 }
 
+// TaskID 让 HuntTask 满足 tasksched.Task。
+//
+// 用值接收者：调度器从 DueHuntTasks 拿到的是 []HuntTask，要让元素本身
+// （而不是指针）满足接口，方法就必须定义在值上。
+func (t HuntTask) TaskID() string { return t.ID }
+
 // ADList 把逗号分隔的可用域拆成切片。
 func (t *HuntTask) ADList() []string {
 	if strings.TrimSpace(t.ADs) == "" {

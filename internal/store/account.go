@@ -71,6 +71,12 @@ type Account struct {
 	SubscriptionStartsAt *time.Time `json:"subscriptionStartsAt"`
 	// SubscriptionEndsAt 在试用订阅上就是试用到期日。
 	SubscriptionEndsAt *time.Time `json:"subscriptionEndsAt"`
+
+	// CapabilityProbe 是最近一次权限自检的结果，JSON 串（见 accountsvc.CapabilityProbe）。
+	//
+	// 不直接反序列化成结构体放进 Account：store 层不该知道 accountsvc 的类型，
+	// 否则这两个包会互相依赖。接口层解析成结构化数据后再给前端。
+	CapabilityProbe string `json:"-"`
 }
 
 // EffectiveRegions 返回同步实例时应当遍历的区域列表。
@@ -127,7 +133,7 @@ const accountColumns = `id, alias, code, color_index, tenancy_ocid, user_ocid, f
 	default_region, compartment_ocid, enabled, status, status_message,
 	last_checked_at, created_at, updated_at, subscribed_regions, home_region,
 	email, tenancy_name, payment_model, subscription_state,
-	subscription_starts_at, subscription_ends_at`
+	subscription_starts_at, subscription_ends_at, capability_probe`
 
 // CreateAccount 校验凭据格式、加密私钥并落库。
 //
@@ -136,7 +142,7 @@ const accountColumns = `id, alias, code, color_index, tenancy_ocid, user_ocid, f
 func (s *Store) CreateAccount(ctx context.Context, in NewAccount) (*Account, error) {
 	key, err := ociclient.ParsePrivateKey([]byte(in.PrivateKeyPEM))
 	if err != nil {
-		return nil, fmt.Errorf("私钥解析失败: %w", err)
+		return nil, Invalidf("私钥解析失败: %w", err)
 	}
 
 	creds := &ociclient.Credentials{
@@ -147,16 +153,16 @@ func (s *Store) CreateAccount(ctx context.Context, in NewAccount) (*Account, err
 		PrivateKey:  key,
 	}
 	if err := creds.Validate(); err != nil {
-		return nil, err
+		return nil, Invalidf("%w", err)
 	}
 
 	code, err := NormalizeCode(in.Code)
 	if err != nil {
-		return nil, err
+		return nil, Invalidf("%w", err)
 	}
 	alias := strings.TrimSpace(in.Alias)
 	if alias == "" {
-		return nil, errors.New("账号别名不能为空")
+		return nil, Invalidf("账号别名不能为空")
 	}
 
 	colorIndex := in.ColorIndex
@@ -166,7 +172,7 @@ func (s *Store) CreateAccount(ctx context.Context, in NewAccount) (*Account, err
 		}
 	}
 	if colorIndex < 1 || colorIndex > ColorCount {
-		return nil, fmt.Errorf("身份色序号必须在 1..%d 之间", ColorCount)
+		return nil, Invalidf("身份色序号必须在 1..%d 之间", ColorCount)
 	}
 
 	id, err := newID()
@@ -278,27 +284,27 @@ func (s *Store) UpdateAccount(ctx context.Context, id string, up AccountUpdate) 
 	if up.Alias != nil {
 		alias := strings.TrimSpace(*up.Alias)
 		if alias == "" {
-			return nil, errors.New("账号别名不能为空")
+			return nil, Invalidf("账号别名不能为空")
 		}
 		add("alias = ?", alias)
 	}
 	if up.Code != nil {
 		code, err := NormalizeCode(*up.Code)
 		if err != nil {
-			return nil, err
+			return nil, Invalidf("%w", err)
 		}
 		add("code = ?", code)
 	}
 	if up.ColorIndex != nil {
 		if *up.ColorIndex < 1 || *up.ColorIndex > ColorCount {
-			return nil, fmt.Errorf("身份色序号必须在 1..%d 之间", ColorCount)
+			return nil, Invalidf("身份色序号必须在 1..%d 之间", ColorCount)
 		}
 		add("color_index = ?", *up.ColorIndex)
 	}
 	if up.DefaultRegion != nil {
 		region := ociclient.NormalizeRegion(*up.DefaultRegion)
 		if region == "" {
-			return nil, errors.New("默认区域不能为空")
+			return nil, Invalidf("默认区域不能为空")
 		}
 		add("default_region = ?", region)
 	}
@@ -327,7 +333,7 @@ func (s *Store) UpdateAccount(ctx context.Context, id string, up AccountUpdate) 
 	if up.PrivateKeyPEM != nil {
 		key, err := ociclient.ParsePrivateKey([]byte(*up.PrivateKeyPEM))
 		if err != nil {
-			return nil, fmt.Errorf("私钥解析失败: %w", err)
+			return nil, Invalidf("私钥解析失败: %w", err)
 		}
 		fingerprint := current.Fingerprint
 		if up.Fingerprint != nil {
@@ -335,7 +341,7 @@ func (s *Store) UpdateAccount(ctx context.Context, id string, up AccountUpdate) 
 		}
 		actual := ociclient.FingerprintOf(&key.PublicKey)
 		if !strings.EqualFold(fingerprint, actual) {
-			return nil, fmt.Errorf("指纹与新私钥不匹配：配置为 %s，私钥实际指纹为 %s", fingerprint, actual)
+			return nil, Invalidf("指纹与新私钥不匹配：配置为 %s，私钥实际指纹为 %s", fingerprint, actual)
 		}
 
 		ciphertext, nonce, err := s.box.Seal([]byte(*up.PrivateKeyPEM), id)
@@ -349,7 +355,7 @@ func (s *Store) UpdateAccount(ctx context.Context, id string, up AccountUpdate) 
 		add("status = ?", StatusUnchecked)
 		add("status_message = ?", "")
 	} else if up.Fingerprint != nil {
-		return nil, errors.New("修改指纹必须同时提供匹配的新私钥")
+		return nil, Invalidf("修改指纹必须同时提供匹配的新私钥")
 	}
 
 	args = append(args, id)
@@ -420,6 +426,23 @@ func (s *Store) SetAccountStatus(ctx context.Context, id, status, message string
 		WHERE id = ?`, status, message, now, now, id)
 	if err != nil {
 		return fmt.Errorf("store: 更新账号状态失败: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// SetAccountCapabilityProbe 保存一次权限自检的结果（JSON 串）。
+//
+// 不动 updated_at：自检不改变账号配置，而 ociconn 是按 updated_at 判断
+// 客户端缓存是否失效的——改它会让每个客户端被无谓地重建一次，
+// 连带重新解密私钥。
+func (s *Store) SetAccountCapabilityProbe(ctx context.Context, id, probeJSON string) error {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE accounts SET capability_probe = ? WHERE id = ?`, probeJSON, id)
+	if err != nil {
+		return fmt.Errorf("store: 保存权限自检结果失败: %w", err)
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
 		return ErrNotFound
@@ -583,6 +606,7 @@ func scanAccount(sc rowScanner) (*Account, error) {
 		&lastCheck, &created, &updated, &regionsCSV, &a.HomeRegion,
 		&a.Email, &a.TenancyName,
 		&a.PaymentModel, &a.SubscriptionState, &subStarts, &subEnds,
+		&a.CapabilityProbe,
 	)
 	if err != nil {
 		return nil, err

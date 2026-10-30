@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -134,4 +135,43 @@ func (s *Server) danger(next http.HandlerFunc) http.HandlerFunc {
 		}
 		next(w, r)
 	}
+}
+
+// ---- 危险操作分级 ----
+//
+// 分级的判据不是「操作多重要」，而是「误操作之后能不能撤销」：
+//
+//	L1 普通       读、改名、打备注                      —— 无门槛
+//	L2 有损       强制关机/重启                         —— 要求 force=true
+//	L3 不可逆     终止实例、删账号、换 IP、改安全规则    —— 要求 TOTP 复核
+//	L4 可能自锁   整体替换安全规则、恢复备份            —— 要求 TOTP + 回传目标名
+//
+// L4 与 L3 的差别在于「错了之后连补救的入口都没了」。安全列表是整体替换语义，
+// 一次提交漏掉 SSH 规则就等于把自己关在门外，而此时唯一能改回来的入口正是
+// 你刚关掉的那条规则。这类操作必须让人把目标名亲手打一遍——打的过程就是
+// 最后三秒钟的复核机会。
+
+// requireNamedConfirm 执行 L4 复核：TOTP + 回传目标显示名。
+//
+// target 必须是服务端从 OCI 或本地库查出来的真实名称，不能取自请求参数，
+// 否则确认词就退化成「把前端传来的字符串再传回来一次」。
+func (s *Server) requireNamedConfirm(w http.ResponseWriter, r *http.Request, target string) bool {
+	if !s.requireDangerTOTP(w, r) {
+		return false
+	}
+	if target == "" {
+		// 拿不到目标名说明前置查询有问题。这时放行等于跳过了 L4 的唯一实质，
+		// 宁可报错让用户重试。
+		writeError(w, http.StatusConflict, "confirm_target_unknown",
+			"无法确定该操作的目标名称，已中止。请刷新后重试。")
+		return false
+	}
+	got := strings.TrimSpace(r.URL.Query().Get("confirm"))
+	if got == target {
+		return true
+	}
+	writeError(w, http.StatusBadRequest, "confirm_required",
+		"该操作可能让你失去对资源的访问入口。如确认执行，请在 confirm 参数中回传目标名称 "+
+			strconv.Quote(target))
+	return false
 }
