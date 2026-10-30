@@ -311,12 +311,32 @@ dev 版本要和生产版本并排跑，四条都必须错开：
 | 项 | 结果 |
 |---|---|
 | 容器 | `ocicore-dev` → `healthy`，与生产的 `ocicore` 并存 |
-| 版本 | `/api/status` 返回 `"version":"dev"` |
-| 鉴权 | `/api/tasks`、`/api/jobs`、`/api/instances`、`/api/accounts`、`/api/logs/stream`、`/api/geo/status` 全 401；`POST /api/ops/change-ip` 无 CSRF 403、带 CSRF 未登录 401 |
+| 版本 | `/api/status` 返回 `"version":"dev-<commit>"`（二进制里编进提交号，用来确认跑的是哪个提交） |
+| 鉴权 | `/api/tasks`、`/api/jobs`、`/api/instances`、`/api/accounts`、`/api/logs/stream`、`/api/geo/status`、`/api/cf/zones` 全 401；`POST /api/ops/change-ip` 无 CSRF 403、带 CSRF 未登录 401 |
 | 迁移 | dev 库 **20 表 / 20 索引**（部署时生产还是 0.4.14，11 表 / 10 索引）。生产后来升到 0.5.4（12 表），dev 仍多出 8 张本地表：`ops_tasks`、`cf_zones`、`cf_records`、`ip_cache`、`risk_budget`、`account_health`、`account_meta`、`account_tags` |
 | `ops_tasks` | 22 列，索引 `idx_ops_due` / `idx_ops_account` 齐全 |
 | 日志 | 0 条 ERROR |
-| 磁盘 | 全程增加 34MB（895MB 可用 → 861MB） |
+| 磁盘 | 全程增加 34MB（895MB 可用 → 861MB）；dev 容器重建一次再多用约 25MB |
+
+更新 dev 实例（换新二进制）不需要重新准备数据卷，迁移会在启动时自己补：
+
+```bash
+# 构建机上
+CGO_ENABLED=0 GOOS=linux GOARCH=arm64 ./_tools/go/bin/go build -trimpath \
+  -ldflags "-s -w -X main.version=dev-$(git rev-parse --short HEAD)" \
+  -o _dist/deploy-dev/ocicore ./cmd/server
+scp _dist/deploy-dev/ocicore root@<vps>:/opt/ocicore-dev/ocicore.new
+
+# VPS 上（留一份 .prev 便于即时回滚）
+cd /opt/ocicore-dev && cp -a ocicore ocicore.prev \
+  && mv ocicore.new ocicore && chmod 755 ocicore \
+  && docker compose up -d --build
+```
+
+> 生产实例若跟随上游 tag 升级，先确认 GHCR 上**该版本镜像已发布**
+> （`docker manifest inspect ghcr.io/jsongmax/oci-core:<ver>`）。上游打 tag 与发镜像
+> 并不同步——实测 v0.5.5 的 tag 已存在但镜像未发布，这种情况生产保持上一个已发布
+> 版本即可，不要为了一个前端小改动去自建镜像，否则会丢掉「跟官方镜像」的维护模型。
 
 ### 10.3 几个容易踩的点
 
