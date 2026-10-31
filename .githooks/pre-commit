@@ -1,0 +1,117 @@
+#!/usr/bin/env bash
+# .githooks/pre-commit —— 提交前评估：拦截「过程数据」与「隐私数据」
+#
+# 仓库仅靠 .gitignore 是被动防护（git add -f 可绕过）。本钩子做主动评估，
+# 在每次提交前扫描暂存区，命中即拒绝提交，确保只有最终的功能修改入库。
+#
+# 拦截两类：
+#   1) 路径命中 —— .workbuddy-ai/、_dist/、dist-demo/、_ref/、_probe/、_tools/、
+#      data/、*.key、*.pem、*.db、裸 .env 等。无论是否已被 gitignore，均拦截。
+#   2) 内容命中 —— 文本文件里出现高信号密钥（PEM 私钥块、硬编码密钥赋值等）。
+#
+# 例外（白名单，可在此扩展）：
+#   - .env.example / .env.demo / .env.sample / .env.template / .env.dist 等模板
+#   - .githooks/ 自身、*_test.go、testdata/ 不参与内容扫描（避免误伤测试夹具）
+#
+# 激活方式（克隆后需执行一次）：git config core.hooksPath .githooks
+# 确有需要绕过时：git commit --no-verify（请先确认不是误报）
+set -u
+
+# ---- 终端颜色（无 TTY 时降级为纯文本） ----
+if [ -t 1 ]; then
+  RED=$'\033[31m'; YEL=$'\033[33m'; GRN=$'\033[32m'; BLD=$'\033[1m'; RST=$'\033[0m'
+else
+  RED=''; YEL=''; GRN=''; BLD=''; RST=''
+fi
+
+# ---- 收集暂存文件 ----
+STAGED=()
+while IFS= read -r f; do
+  [ -n "$f" ] && STAGED+=("$f")
+done < <(git diff --cached --name-only --diff-filter=ACMR)
+
+# 没有任何暂存内容（如空提交、amend 无改动）直接放行
+[ "${#STAGED[@]}" -eq 0 ] && exit 0
+
+# 允许入库的 .env 模板名（前后加空格便于精确匹配）
+ALLOW_ENV=" example demo sample template dist local.example local.sample "
+
+bad=()   # 每条格式： "路径|原因"
+
+# ---- 路径黑名单 ----
+for f in "${STAGED[@]}"; do
+  base=$(basename -- "$f")
+
+  case "$f" in
+    .workbuddy-ai|.workbuddy-ai/*)
+      bad+=("$f|WorkBuddy 工作记忆（过程/隐私，不应入库）"); continue;;
+  esac
+  case "$f" in
+    _dist/*|dist-demo/*|_ref/*|_probe/*|_tools/*|data/*|.data/*)
+      bad+=("$f|本地构建/运行/工具目录（过程数据）"); continue;;
+  esac
+  case "$base" in
+    *.key|*.pem|*.pfx|*.keystore|*.db|*.db-wal|*.db-shm|id_rsa|id_dsa|id_ecdsa|master.key)
+      bad+=("$f|密钥/证书/数据库文件（隐私）"); continue;;
+  esac
+  case "$base" in
+    .env)
+      bad+=("$f|真实环境变量文件（含密钥）"); continue;;
+    .env.local|.env.*.local)
+      bad+=("$f|本地环境变量（含密钥）"); continue;;
+    .env.*)
+      name=${base#.env.}
+      # 注意：必须用 case 做 glob 匹配。`[ "x" != *pat* ]` 在 [ ] 里是纯字符串
+      # 比较，不展开通配符，会把 .env.demo 这类模板也误拦。
+      case " $ALLOW_ENV " in
+        *" $name "*) : ;;
+        *) bad+=("$f|非白名单的 .env.* 文件"); continue ;;
+      esac;;
+  esac
+done
+
+# ---- 内容扫描（跳过钩子自身、测试、夹具、二进制） ----
+for f in "${STAGED[@]}"; do
+  case "$f" in
+    .githooks/*|*_test.go|testdata/*) continue;;
+  esac
+  # 取暂存内容（不落盘）
+  content=$(git show ":$f" 2>/dev/null) || continue
+  # 二进制跳过：bash 字符串存不了 NUL，`$'\x00'` 会退化成空串，导致
+  # `case ... in *$'\x00'*)` 恒真、把内容扫描整个跳过。改用 grep -I：
+  # 含 NUL 的文件被视为二进制、不产生匹配，于是这里直接跳过。
+  if ! printf '%s\n' "$content" | grep -qI .; then continue; fi
+
+  # PEM 私钥块：最高信号，几乎只出现在真实密钥里
+  # 模式以 `-----` 开头，必须用 `--` 终止选项解析，否则 grep 会当成未知参数。
+  if printf '%s\n' "$content" | grep -Eq -- '-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----'; then
+    bad+=("$f|内容含 PEM 私钥块"); continue
+  fi
+
+  # 敏感变量名 + 非占位值。占位值（<env>、${VAR}、your_、example、xxx、
+  # changeme、placeholder、__、TODO、XXX）不判为泄漏。
+  if printf '%s\n' "$content" \
+     | grep -nE '^[[:space:]]*(API_KEY|SECRET|SECRET_KEY|CLIENT_SECRET|PASSWORD|PASSWD|ACCESS_TOKEN|PRIVATE_KEY|TOKEN|MASTER_KEY|MASTERKEY|ENCRYPT_KEY)[[:space:]]*=' \
+     | grep -vE '=[[:space:]]*("?<|\{|\$\{|your_|example|xxx|changeme|placeholder|__|TODO|XXX)' >/dev/null; then
+    bad+=("$f|内容疑似硬编码密钥赋值")
+  fi
+done
+
+# ---- 结果 ----
+if [ "${#bad[@]}" -gt 0 ]; then
+  echo "${RED}${BLD}✗ 提交被拦截：检出 ${#bad[@]} 处过程/隐私数据${RST}"
+  echo
+  for e in "${bad[@]}"; do
+    p="${e%%|*}"; r="${e##*|}"
+    echo "  ${RED}•${RST} $p  —— $r"
+  done
+  echo
+  echo "${YEL}处理建议：${RST}"
+  echo "  1) 从暂存区移除（磁盘文件保留）：${BLD}git restore --staged <文件>${RST}"
+  echo "  2) 若确属需入库的模板，请在上文 ALLOW_ENV 白名单中追加对应名称"
+  echo "  3) 确认无误报后强制提交：${BLD}git commit --no-verify${RST}（请谨慎）"
+  exit 1
+fi
+
+echo "${GRN}✓ 提交前评估通过：未发现过程/隐私数据${RST}"
+exit 0

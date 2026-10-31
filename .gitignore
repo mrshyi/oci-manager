@@ -34,6 +34,12 @@
 # 与项目本身无关，不入库。
 /.workbuddy-ai/
 
+# 真实环境变量（含 OCI 密钥、Token）。绝不入库；模板（.env.example/.env.demo
+# 等）例外，由 .githooks/pre-commit 的白名单放行。
+.env
+.env.local
+.env.*.local
+
 # 交叉编译产物
 /_dist/
 
