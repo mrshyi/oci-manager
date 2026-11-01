@@ -393,7 +393,7 @@ func (s *Server) routes() {
 // 顺序：安全响应头 → CSRF → 路由。CSRF 放在路由之前、且由中间件统一执行，
 // 而不是给每条路由包一层——见 csrfGuard 的说明。
 func (s *Server) Handler() http.Handler {
-	return securityHeaders(csrfGuard(s.mux))
+	return SecurityHeaders(csrfGuard(s.mux))
 }
 
 // ServeHTTP 让 Server 本身可以作为 http.Handler 使用。
@@ -401,8 +401,13 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.Handler().ServeHTTP(w, r)
 }
 
-// securityHeaders 设置基础安全响应头。
-func securityHeaders(next http.Handler) http.Handler {
+// SecurityHeaders 设置基础安全响应头。
+//
+// 导出是给 cmd/server 用的：它要把整个 mux（API + 前端资源）包一层。
+// 曾经只在 Handler() 里包 /api/*，结果是 JSON 响应带着 CSP，
+// 真正需要 CSP 的 HTML 文档反而裸奔——点击劫持与内联脚本注入都拦不住。
+// 安全头应当加在最外层，见 cmd/server 的 newRootHandler。
+func SecurityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
 		h.Set("X-Content-Type-Options", "nosniff")

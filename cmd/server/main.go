@@ -311,12 +311,24 @@ func buildHandler(api *httpapi.Server, cfg config.Config) (http.Handler, error) 
 		}
 		assets = embedded
 	}
-	fileServer := http.FileServer(http.FS(assets))
+	return newRootHandler(api.Handler(), assets), nil
+}
 
+// newRootHandler 把 API 与前端资源拼起来，并在最外层套上安全响应头。
+//
+// 安全头必须加在这一层，而不是只加在 api.Handler() 里。后者只会覆盖
+// /api/*，于是真正需要 CSP 和防点击劫持的 HTML 文档反而是裸的——
+// 一个「登录页能被任意站点 iframe 套住、应用壳没有内联脚本兜底」的缺口。
+// api.Handler() 自己也带了一层，那是为了让它能被单独挂载时依然安全；
+// 这里重复设置同一批头是幂等的，代价可以忽略。
+//
+// 单独抽成函数是为了能测：assets 传一个 fstest.MapFS 就能验证
+// 「首页、前端路由、静态资源、API 四条路径都拿到了头」。
+func newRootHandler(apiHandler http.Handler, assets fs.FS) http.Handler {
 	mux := http.NewServeMux()
-	mux.Handle("/api/", api.Handler())
-	mux.Handle("/", spaHandler(assets, fileServer))
-	return mux, nil
+	mux.Handle("/api/", apiHandler)
+	mux.Handle("/", spaHandler(assets, http.FileServer(http.FS(assets))))
+	return httpapi.SecurityHeaders(mux)
 }
 
 // spaHandler 提供静态资源，并把未匹配的路径回落到 index.html，
