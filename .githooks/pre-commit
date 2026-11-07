@@ -12,6 +12,10 @@
 # 例外（白名单，可在此扩展）：
 #   - .env.example / .env.demo / .env.sample / .env.template / .env.dist 等模板
 #   - .githooks/ 自身、*_test.go、testdata/ 不参与内容扫描（避免误伤测试夹具）
+#   - internal/web/dist/* 是 web/src 的构建产物（.gitattributes 已标
+#     linguist-generated/-diff），源码本身已被扫描；产物里会带源码中的占位
+#     提示文本（如 CredentialField.vue 的 "-----BEGIN PRIVATE KEY-----"），
+#     扫描它只会造成误报。
 #
 # 激活方式（克隆后需执行一次）：git config core.hooksPath .githooks
 # 确有需要绕过时：git commit --no-verify（请先确认不是误报）
@@ -73,7 +77,7 @@ done
 # ---- 内容扫描（跳过钩子自身、测试、夹具、二进制） ----
 for f in "${STAGED[@]}"; do
   case "$f" in
-    .githooks/*|*_test.go|testdata/*) continue;;
+    .githooks/*|*_test.go|testdata/*|internal/web/dist/*) continue;;
   esac
   # 取暂存内容（不落盘）
   content=$(git show ":$f" 2>/dev/null) || continue
