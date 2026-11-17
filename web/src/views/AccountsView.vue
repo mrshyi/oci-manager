@@ -1,5 +1,6 @@
 <script setup lang="ts">
 /** §4.3 账号管理：卡片网格 + 四种连通性状态，P2-1 加标签筛选与分组折叠 */
+import { t } from '@/i18n'
 import { computed, ref, watch } from 'vue'
 import { useStore } from '@/store'
 import { acctColor, pct, usageTone } from '@/lib/format'
@@ -20,11 +21,9 @@ const {
 } = useStore()
 
 const tierLabel: Record<Account['tier'], string> = {
-  trial: '试用号',
-  paid: '升级号',
-  // 读不到订阅信息时不猜。写"升级号"会让用户以为资源是稳的,
-  // 写"试用号"又会平白吓人一跳。
-  unknown: '类型未知'
+  trial: t.accountsPage.tier.trial,
+  paid: t.accountsPage.tier.paid,
+  unknown: t.accountsPage.tier.unknown
 }
 
 /**
@@ -36,9 +35,9 @@ const tierLabel: Record<Account['tier'], string> = {
 function trialText(a: Account): string {
   const d = trialDaysLeft(a)
   if (d === null) return ''
-  if (d < 0) return '试用已到期'
-  if (d === 0) return '试用今日到期'
-  return `试用 ${d} 天后到期`
+  if (d < 0) return t.accountsPage.trialExpired
+  if (d === 0) return t.accountsPage.trialToday
+  return t.accountsPage.trialDays(d)
 }
 
 function trialTone(a: Account): string {
@@ -58,9 +57,9 @@ function trialTone(a: Account): string {
 function expiryText(a: Account): string {
   const d = a.expiryDays
   if (d === null || d === undefined) return ''
-  if (d < 0) return `已过期 ${-d} 天`
-  if (d === 0) return '今日到期'
-  return `${d} 天后到期`
+  if (d < 0) return t.accountsPage.expiryExpired(-d)
+  if (d === 0) return t.accountsPage.expiryToday
+  return t.accountsPage.expiryDays(d)
 }
 
 function expiryTone(a: Account): string {
@@ -159,9 +158,9 @@ const fatalThreshold = 2
 const summary = computed(() => {
   const off = state.accounts.filter(a => a.status === 'disabled').length
   const red = fatalAccounts.value.length
-  const base = `${state.accounts.length} 个 Oracle 租户 · ${red} 个凭据异常 · ${off} 个已禁用`
+  const base = t.accountsPage.summary(state.accounts.length, red, off)
   if (!tagFilter.value.length) return base
-  return `${base} · 筛选后 ${visible.value.length} 个`
+  return `${base} · ${t.accountsPage.summaryFiltered(visible.value.length)}`
 })
 
 const instancesOf = (id: string) => state.instances.filter(i => i.accountId === id && i.state !== 'TERMINATED')
@@ -219,17 +218,17 @@ const knownGroups = computed(() =>
   <div class="page">
     <header class="page-head">
       <div>
-        <h1 class="page-title">账号</h1>
+        <h1 class="page-title">{{ t.accountsPage.title }}</h1>
         <p class="page-sub">{{ summary }}</p>
       </div>
       <div class="head-actions">
-        <div class="segmented" role="group" aria-label="视图切换">
+        <div class="segmented" role="group" :aria-label="t.accountsPage.viewSwitch">
           <button class="segmented__btn" :class="{ 'is-on': view === 'card' }"
-                  :aria-pressed="view === 'card'" @click="view = 'card'">▦ 卡片</button>
+                  :aria-pressed="view === 'card'" @click="view = 'card'">{{ t.accountsPage.cards }}</button>
           <button class="segmented__btn" :class="{ 'is-on': view === 'list' }"
-                  :aria-pressed="view === 'list'" @click="view = 'list'">☰ 列表</button>
+                  :aria-pressed="view === 'list'" @click="view = 'list'">{{ t.accountsPage.list }}</button>
         </div>
-        <button class="btn btn--primary" @click="openDrawer({ kind: 'add-account' })">添加账号</button>
+        <button class="btn btn--primary" @click="openDrawer({ kind: 'add-account' })">{{ t.accountsPage.addAccount }}</button>
       </div>
     </header>
     <LoadingBar :active="state.loading && state.accounts.length > 0" />
@@ -245,22 +244,21 @@ const knownGroups = computed(() =>
     <section v-if="fatalAccounts.length" class="redzone" role="alert">
       <header class="redzone__head">
         <span class="redzone__title">
-          {{ fatalAccounts.length }} 个账号的凭据或权限异常，请到控制台确认账号状态
+          {{ t.accountsPage.fatalTitle(fatalAccounts.length) }}
         </span>
         <span class="redzone__sub">
-          连续 {{ fatalThreshold }} 次校验失败才会列入此处，单次抖动不算。已确认过的账号可以点「已知悉」，
-          下次校验若仍失败会重新出现。
+          {{ t.accountsPage.fatalSub(fatalThreshold) }}
         </span>
       </header>
       <ul class="redzone__list">
         <li v-for="a in fatalAccounts" :key="a.id" class="redzone__item">
           <span class="redzone__dot" :style="{ background: acctColor(a.colorIndex) }" />
-          <button type="button" class="redzone__name" @click="openDrawer({ kind: 'account', id: a.id, tab: '密钥' })">
+          <button type="button" class="redzone__name" @click="openDrawer({ kind: 'account', id: a.id, tab: 'keys' })">
             {{ a.alias }}<span class="mono redzone__code">{{ a.code }}</span>
           </button>
           <span v-if="a.healthErrorClass" class="redzone__class mono">{{ a.healthErrorClass }}</span>
-          <span v-if="a.healthErrorAt" class="redzone__when">{{ relativeTime(a.healthErrorAt) }}失败</span>
-          <button type="button" class="redzone__ack" @click.stop="clearAccountHealth(a.id)">已知悉</button>
+          <span v-if="a.healthErrorAt" class="redzone__when">{{ relativeTime(a.healthErrorAt) }}{{ t.accountsPage.fatalFailed }}</span>
+          <button type="button" class="redzone__ack" @click.stop="clearAccountHealth(a.id)">{{ t.accountsPage.fatalAck }}</button>
         </li>
       </ul>
     </section>
@@ -281,12 +279,12 @@ const knownGroups = computed(() =>
       <div v-else class="card"><SkeletonRows :rows="3" /></div>
     </template>
 
-    <EmptyState v-else-if="!state.accounts.length" icon="⬡" title="还没有接入任何 Oracle 账号"
-                sub="接入后即可统一管理所有实例" action-label="添加第一个账号"
+    <EmptyState v-else-if="!state.accounts.length" icon="⬡" :title="t.accountsPage.emptyTitle"
+                :sub="t.accountsPage.emptySub" :action-label="t.accountsPage.addFirst"
                 @action="openDrawer({ kind: 'add-account' })" />
 
-    <EmptyState v-else-if="!visible.length" icon="🏷" title="没有账号带这些标签"
-                sub="换一个标签，或清除筛选看全部" action-label="清除筛选"
+    <EmptyState v-else-if="!visible.length" icon="🏷" :title="t.accountsPage.emptyFilteredTitle"
+                :sub="t.accountsPage.emptyFilteredSub" :action-label="t.accountsPage.clearFilter"
                 @action="tagFilter = []" />
 
     <!-- 卡片视图 -->
@@ -295,7 +293,7 @@ const knownGroups = computed(() =>
         <button v-if="showGroups" type="button" class="grouphead" :aria-expanded="!collapsed.has(g.name)"
                 @click="toggleGroup(g.name)">
           <span class="grouphead__caret">{{ collapsed.has(g.name) ? '▸' : '▾' }}</span>
-          <span class="grouphead__name">{{ g.name || '未分组' }}</span>
+          <span class="grouphead__name">{{ g.name || t.accountsPage.ungrouped }}</span>
           <span class="grouphead__n mono">{{ g.list.length }}</span>
         </button>
 
@@ -303,21 +301,21 @@ const knownGroups = computed(() =>
           <article v-for="a in g.list" :key="a.id" class="card acct"
                    :class="{ 'is-error': a.status === 'error', 'is-disabled': a.status === 'disabled' }"
                    :style="{ '--c': acctColor(a.colorIndex) }"
-                   tabindex="0" @click="openDrawer({ kind: 'account', id: a.id, tab: '概览' })"
-                   @keydown.enter="openDrawer({ kind: 'account', id: a.id, tab: '概览' })">
+                   tabindex="0" @click="openDrawer({ kind: 'account', id: a.id, tab: 'overview' })"
+                   @keydown.enter="openDrawer({ kind: 'account', id: a.id, tab: 'overview' })">
             <span class="acct__bar" />
             <div class="acct__body">
-              <p v-if="a.status === 'error'" class="acct__errbar">凭据失效 · 该账号下的资源暂不可操作</p>
+              <p v-if="a.status === 'error'" class="acct__errbar">{{ t.accountsPage.credInvalid }}</p>
 
               <header class="acct__head">
                 <span class="acct__lamp" :style="{ '--l': lampTone[a.status] }"
                       :class="{ 'is-solid': a.status !== 'disabled', 'is-pulsing': a.status === 'checking' || a.status === 'error' }" />
                 <h2 class="acct__alias">{{ a.alias }}</h2>
                 <span class="acct__code mono">{{ a.code }}</span>
-                <button class="acct__menu" aria-label="整理标签与分组" title="整理标签与分组"
+                <button class="acct__menu" :aria-label="t.accountsPage.organizeLabel" :title="t.accountsPage.organizeLabel"
                         @click.stop="openOrganize(a.id)">🏷</button>
-                <button class="acct__menu" aria-label="账号菜单"
-                        @click.stop="openDrawer({ kind: 'account', id: a.id, tab: '密钥' })">⋯</button>
+                <button class="acct__menu" :aria-label="t.accountsPage.accountMenu"
+                        @click.stop="openDrawer({ kind: 'account', id: a.id, tab: 'keys' })">⋯</button>
               </header>
 
               <p class="acct__mail"><MaskedText :value="a.email" kind="email" /></p>
@@ -348,9 +346,9 @@ const knownGroups = computed(() =>
                 <CapabilityDots :probe="a.capability" :busy="probingAccount === a.id" />
                 <button type="button" class="acct__probe"
                         :disabled="probingAccount !== null"
-                        :title="a.capability ? '重新做一次权限自检（5 次只读请求）' : '检查这个账号能调用哪些接口'"
+                        :title="a.capability ? t.accountsPage.probeRetestTitle : t.accountsPage.probeTitle"
                         @click.stop="runCapabilityProbe(a.id)">
-                  {{ probingAccount === a.id ? '自检中…' : a.capability ? '重测' : '自检' }}
+                  {{ probingAccount === a.id ? t.accountsPage.probeRunning : a.capability ? t.accountsPage.probeRetest : t.accountsPage.probeTest }}
                 </button>
               </div>
 
@@ -366,15 +364,15 @@ const knownGroups = computed(() =>
                 <span class="skeleton" style="width: 56px; height: 32px" />
               </div>
               <div v-else class="acct__stats">
-                <div><p class="acct__stat-label">实例</p><p class="acct__stat mono">{{ instancesOf(a.id).length }}</p></div>
-                <div><p class="acct__stat-label">运行</p>
+                <div><p class="acct__stat-label">{{ t.accountsPage.statInstances }}</p><p class="acct__stat mono">{{ instancesOf(a.id).length }}</p></div>
+                <div><p class="acct__stat-label">{{ t.accountsPage.statRunning }}</p>
                   <p class="acct__stat mono" style="color: var(--success)">{{ instancesOf(a.id).filter(i => i.state === 'RUNNING').length }}</p></div>
-                <div><p class="acct__stat-label">停止</p>
+                <div><p class="acct__stat-label">{{ t.accountsPage.statStopped }}</p>
                   <p class="acct__stat mono dim">{{ instancesOf(a.id).filter(i => i.state === 'STOPPED').length }}</p></div>
               </div>
 
               <div class="acct__quota">
-                <span class="t-2xs dim">ARM 配额</span>
+                <span class="t-2xs dim">{{ t.accountsPage.armQuota }}</span>
                 <span class="acct__track">
                   <span v-if="!a.quota.unlimited.ocpu" class="acct__fill" :style="{
                     width: pct(a.quota.ocpuUsed, a.quota.ocpuLimit) + '%',
@@ -383,7 +381,7 @@ const knownGroups = computed(() =>
                 </span>
                 <span class="mono t-2xs acct__quota-val"
                       :style="{ color: a.quota.unlimited.ocpu ? 'var(--text-secondary)' : usageTone(a.quota.ocpuUsed, a.quota.ocpuLimit) }">
-                  <template v-if="a.quota.unlimited.ocpu">{{ a.quota.ocpuUsed }} OCPU · 不限</template>
+                  <template v-if="a.quota.unlimited.ocpu">{{ a.quota.ocpuUsed }} OCPU · {{ t.accountsPage.unlimited }}</template>
                   <template v-else>{{ a.quota.ocpuUsed }} / {{ a.quota.ocpuLimit }} OCPU</template>
                 </span>
               </div>
@@ -404,16 +402,16 @@ const knownGroups = computed(() =>
     <!-- 列表视图。表头只画一次，分组标题作为穿插的行。 -->
     <div v-else class="card table reveal">
       <div class="table-head acols">
-        <span>账号</span><span>类型 · 账龄</span><span class="col-region">区域</span>
-        <span class="col-count">实例</span><span class="col-quota">ARM 配额</span>
-        <span>健康度 · 最后校验</span><span></span>
+        <span>{{ t.accountsPage.colAccount }}</span><span>{{ t.accountsPage.colTier }}</span><span class="col-region">{{ t.accountsPage.colRegion }}</span>
+        <span class="col-count">{{ t.accountsPage.colInstances }}</span><span class="col-quota">{{ t.accountsPage.colQuota }}</span>
+        <span>{{ t.accountsPage.colHealth }}</span><span></span>
       </div>
 
       <template v-for="g in grouped" :key="g.name">
         <button v-if="showGroups" type="button" class="grouprow" :aria-expanded="!collapsed.has(g.name)"
                 @click="toggleGroup(g.name)">
           <span class="grouphead__caret">{{ collapsed.has(g.name) ? '▸' : '▾' }}</span>
-          <span class="grouphead__name">{{ g.name || '未分组' }}</span>
+          <span class="grouphead__name">{{ g.name || t.accountsPage.ungrouped }}</span>
           <span class="grouphead__n mono">{{ g.list.length }}</span>
         </button>
 
@@ -421,8 +419,8 @@ const knownGroups = computed(() =>
           <div v-for="a in g.list" :key="a.id" class="table-row acols"
                :class="{ 'is-error': a.status === 'error', 'is-disabled': a.status === 'disabled' }"
                :style="{ '--c': acctColor(a.colorIndex) }"
-               tabindex="0" @click="openDrawer({ kind: 'account', id: a.id, tab: '概览' })"
-               @keydown.enter="openDrawer({ kind: 'account', id: a.id, tab: '概览' })">
+               tabindex="0" @click="openDrawer({ kind: 'account', id: a.id, tab: 'overview' })"
+               @keydown.enter="openDrawer({ kind: 'account', id: a.id, tab: 'overview' })">
             <span class="acct-bar" :style="{ background: acctColor(a.colorIndex) }" />
 
             <span class="cell lcell">
@@ -445,7 +443,7 @@ const knownGroups = computed(() =>
                 <span v-if="trialText(a)" class="acct__trial" :style="{ color: trialTone(a) }">{{ trialText(a) }}</span>
               </span>
               <span class="lcell__sub">
-                {{ accountAgeText(a) || '开户时间未知' }}
+                {{ accountAgeText(a) || t.accountsPage.ageUnknown }}
                 <span v-if="expiryText(a)" :style="{ color: expiryTone(a) }"> · {{ expiryText(a) }}</span>
               </span>
             </span>
@@ -456,7 +454,7 @@ const knownGroups = computed(() =>
 
             <span class="cell mono t-xs col-count">
               {{ instancesOf(a.id).length }}
-              <span class="dim-3">/ 运行 {{ instancesOf(a.id).filter(i => i.state === 'RUNNING').length }}</span>
+              <span class="dim-3">{{ t.accountsPage.runningOf(instancesOf(a.id).filter(i => i.state === 'RUNNING').length) }}</span>
             </span>
 
             <span class="cell lquota col-quota">
@@ -468,7 +466,7 @@ const knownGroups = computed(() =>
               </span>
               <span class="mono t-2xs acct__quota-val"
                     :style="{ color: a.quota.unlimited.ocpu ? 'var(--text-secondary)' : usageTone(a.quota.ocpuUsed, a.quota.ocpuLimit) }">
-                <template v-if="a.quota.unlimited.ocpu">{{ a.quota.ocpuUsed }} · 不限</template>
+                <template v-if="a.quota.unlimited.ocpu">{{ a.quota.ocpuUsed }} · {{ t.accountsPage.unlimited }}</template>
                 <template v-else>{{ a.quota.ocpuUsed }} / {{ a.quota.ocpuLimit }}</template>
               </span>
             </span>
@@ -485,10 +483,10 @@ const knownGroups = computed(() =>
             </span>
 
             <span class="cell">
-              <button class="acct__menu" aria-label="整理标签与分组" title="整理标签与分组"
+              <button class="acct__menu" :aria-label="t.accountsPage.organizeLabel" :title="t.accountsPage.organizeLabel"
                       @click.stop="openOrganize(a.id)">🏷</button>
-              <button class="acct__menu" aria-label="账号菜单"
-                      @click.stop="openDrawer({ kind: 'account', id: a.id, tab: '密钥' })">⋯</button>
+              <button class="acct__menu" :aria-label="t.accountsPage.accountMenu"
+                      @click.stop="openDrawer({ kind: 'account', id: a.id, tab: 'keys' })">⋯</button>
             </span>
           </div>
         </template>

@@ -16,6 +16,7 @@ import (
 	"ocicore/internal/config"
 	"ocicore/internal/geoip"
 	"ocicore/internal/huntsvc"
+	"ocicore/internal/i18n"
 	"ocicore/internal/instancesvc"
 	"ocicore/internal/jobsvc"
 	"ocicore/internal/logstream"
@@ -233,6 +234,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("PATCH /api/instances/{id}/note", s.requireAuth(s.handleSetInstanceNote))
 	s.mux.HandleFunc("POST /api/instances/{id}/reshape", s.requireAuth(s.danger(s.handleReshapeInstance)))
 	s.mux.HandleFunc("DELETE /api/instances/{id}", s.requireAuth(s.danger(s.handleTerminateInstance)))
+	s.mux.HandleFunc("POST /api/instances/{id}/replace-boot-volume", s.requireAuth(s.danger(s.handleReplaceBootVolume)))
 	s.mux.HandleFunc("POST /api/instances/{id}/dismiss-error", s.requireAuth(s.handleDismissInstanceError))
 
 	s.mux.HandleFunc("POST /api/instances/{id}/console", s.requireAuth(s.handleCreateConsole))
@@ -271,6 +273,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /api/instances/{id}/change-ip", s.requireAuth(s.danger(s.handleChangePublicIP)))
 	s.mux.HandleFunc("POST /api/instances/{id}/enable-ipv6", s.requireAuth(s.danger(s.handleEnableIPv6)))
 	s.mux.HandleFunc("DELETE /api/instances/{id}/ipv6", s.requireAuth(s.danger(s.handleRemoveIPv6)))
+	s.mux.HandleFunc("POST /api/instances/{id}/vnics/{vnicId}/ipv6", s.requireAuth(s.danger(s.handleAddIPv6)))
 	// 添加附属网卡只是多分配资源，不走 danger；分离会释放网卡上的公网 IP，不可找回，走 danger。
 	s.mux.HandleFunc("POST /api/instances/{id}/vnics", s.requireAuth(s.handleAttachVnic))
 	s.mux.HandleFunc("DELETE /api/instances/{id}/vnics/{attachmentId}", s.requireAuth(s.danger(s.handleDetachVnic)))
@@ -393,7 +396,7 @@ func (s *Server) routes() {
 // 顺序：安全响应头 → CSRF → 路由。CSRF 放在路由之前、且由中间件统一执行，
 // 而不是给每条路由包一层——见 csrfGuard 的说明。
 func (s *Server) Handler() http.Handler {
-	return SecurityHeaders(csrfGuard(s.mux))
+	return SecurityHeaders(withLang(csrfGuard(s.mux)))
 }
 
 // ServeHTTP 让 Server 本身可以作为 http.Handler 使用。
@@ -439,7 +442,7 @@ func csrfGuard(next http.Handler) http.Handler {
 		default:
 			if r.Header.Get(csrfHeader) != csrfValue {
 				writeError(w, http.StatusForbidden, "csrf",
-					"缺少 "+csrfHeader+" 请求头。跨站请求已被拒绝。")
+					i18n.M("api.csrf", csrfHeader))
 				return
 			}
 		}
@@ -496,7 +499,7 @@ func (s *Server) requireSession(next http.HandlerFunc) http.HandlerFunc {
 		sess, user, token, ok := s.loadSession(r)
 		if !ok {
 			s.clearSessionCookie(w, r)
-			writeError(w, http.StatusUnauthorized, "unauthenticated", "请先登录")
+			writeError(w, http.StatusUnauthorized, "unauthenticated", i18n.M("api.login_required"))
 			return
 		}
 		next(w, r.WithContext(withSession(r.Context(), sess, user, token)))
@@ -509,11 +512,11 @@ func (s *Server) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 		sess, user, token, ok := s.loadSession(r)
 		if !ok {
 			s.clearSessionCookie(w, r)
-			writeError(w, http.StatusUnauthorized, "unauthenticated", "请先登录")
+			writeError(w, http.StatusUnauthorized, "unauthenticated", i18n.M("api.login_required"))
 			return
 		}
 		if user.TOTPEnabled && !sess.TOTPVerified {
-			writeError(w, http.StatusUnauthorized, "totp_required", "请完成两步验证")
+			writeError(w, http.StatusUnauthorized, "totp_required", i18n.M("api.totp_required"))
 			return
 		}
 

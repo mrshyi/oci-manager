@@ -3,12 +3,13 @@ package ociclient
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"net/url"
 	"slices"
 	"strconv"
 	"time"
+
+	"ocicore/internal/i18n"
 )
 
 // 实例生命周期状态。与前端 StateBadge 的六态一一对应。
@@ -272,7 +273,7 @@ func ValidateAction(action string) error {
 	case ActionStart, ActionStop, ActionSoftStop, ActionReset, ActionSoftReset:
 		return nil
 	default:
-		return fmt.Errorf("ociclient: 不支持的实例操作 %q", action)
+		return i18n.Err("oci.action_unsupported", action)
 	}
 }
 
@@ -282,7 +283,25 @@ type UpdateInstanceRequest struct {
 	ShapeConfig  *ShapeConfig      `json:"shapeConfig,omitempty"`
 	Shape        string            `json:"shape,omitempty"`
 	FreeformTags map[string]string `json:"freeformTags,omitempty"`
+	// SourceDetails 不为空时 Oracle 会用新的启动源替换引导卷（Replace boot volume）：
+	// 运行中的实例会被停机、换盘、再开机，实例本身与它占着的容量都保留。
+	SourceDetails *UpdateInstanceSourceDetails `json:"sourceDetails,omitempty"`
+	// Metadata 会整体替换实例元数据，调用方要先合并已有的键再传。
+	Metadata map[string]string `json:"metadata,omitempty"`
 }
+
+// UpdateInstanceSourceDetails 是替换引导卷时的新启动源。目前只用镜像这一种。
+type UpdateInstanceSourceDetails struct {
+	SourceType string `json:"sourceType"`
+	ImageID    string `json:"imageId,omitempty"`
+	// BootVolumeSizeInGBs 为 0 时按镜像默认大小（通常 47 GB）。
+	BootVolumeSizeInGBs int64 `json:"bootVolumeSizeInGBs,omitempty"`
+	// IsPreserveBootVolumeEnabled 为 false 时旧引导卷会被删除。Oracle 默认保留。
+	IsPreserveBootVolumeEnabled *bool `json:"isPreserveBootVolumeEnabled,omitempty"`
+}
+
+// SourceTypeImage 是以镜像为启动源。
+const SourceTypeImage = "image"
 
 // UpdateInstance 修改实例配置。改 OCPU/内存要求实例处于 STOPPED，
 // 否则 OCI 会返回 409 IncorrectState——调用方应提前拦下并给出提示。
@@ -630,39 +649,39 @@ func ValidateShapeConfig(shape *Shape, cfg ShapeConfig) error {
 	}
 	if !shape.IsFlexible {
 		if cfg.Ocpus > 0 || cfg.MemoryInGBs > 0 {
-			return fmt.Errorf("规格 %s 不是弹性规格，无法自定义 OCPU 与内存", shape.Shape)
+			return i18n.Err("oci.shape_not_flex", shape.Shape)
 		}
 		return nil
 	}
 	if cfg.Ocpus <= 0 {
-		return fmt.Errorf("弹性规格必须指定 OCPU 数量")
+		return i18n.Err("oci.flex_need_ocpu")
 	}
 	// BASELINE_1_1 等于不突发，任何弹性规格都接受；改配置时要靠它把突发实例改回独占。
 	if b := cfg.BaselineOcpuUtilization; b != "" && b != Baseline1_1 && !slices.Contains(shape.BaselineOcpuUtilizations, b) {
-		return fmt.Errorf("规格 %s 不支持突发基线 %s", shape.Shape, b)
+		return i18n.Err("oci.burst_unsupported", shape.Shape, b)
 	}
 	if shape.OcpuOptions != nil {
 		if cfg.Ocpus < shape.OcpuOptions.Min || cfg.Ocpus > shape.OcpuOptions.Max {
-			return fmt.Errorf("OCPU 必须在 %g–%g 之间，当前 %g",
+			return i18n.Err("oci.ocpu_range",
 				shape.OcpuOptions.Min, shape.OcpuOptions.Max, cfg.Ocpus)
 		}
 	}
 	if cfg.MemoryInGBs <= 0 {
-		return fmt.Errorf("弹性规格必须指定内存大小")
+		return i18n.Err("oci.flex_need_mem")
 	}
 	if shape.MemoryOptions != nil {
 		mo := shape.MemoryOptions
 		if cfg.MemoryInGBs < mo.MinInGBs || cfg.MemoryInGBs > mo.MaxInGBs {
-			return fmt.Errorf("内存必须在 %g–%g GB 之间，当前 %g GB",
+			return i18n.Err("oci.mem_range",
 				mo.MinInGBs, mo.MaxInGBs, cfg.MemoryInGBs)
 		}
 		perOcpu := cfg.MemoryInGBs / cfg.Ocpus
 		if mo.MaxPerOcpuInGBs > 0 && perOcpu > mo.MaxPerOcpuInGBs {
-			return fmt.Errorf("每 OCPU 最多配 %g GB 内存，当前 %g OCPU 配了 %g GB",
+			return i18n.Err("oci.mem_per_ocpu_max",
 				mo.MaxPerOcpuInGBs, cfg.Ocpus, cfg.MemoryInGBs)
 		}
 		if mo.MinPerOcpuInGBs > 0 && perOcpu < mo.MinPerOcpuInGBs {
-			return fmt.Errorf("每 OCPU 至少需要 %g GB 内存，当前 %g OCPU 只配了 %g GB",
+			return i18n.Err("oci.mem_per_ocpu_min",
 				mo.MinPerOcpuInGBs, cfg.Ocpus, cfg.MemoryInGBs)
 		}
 	}

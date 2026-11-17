@@ -8,6 +8,8 @@
 #   1) 路径命中 —— .workbuddy-ai/、_dist/、dist-demo/、_ref/、_probe/、_tools/、
 #      data/、*.key、*.pem、*.db、裸 .env 等。无论是否已被 gitignore，均拦截。
 #   2) 内容命中 —— 文本文件里出现高信号密钥（PEM 私钥块、硬编码密钥赋值等）。
+#      PEM 私钥块要求 BEGIN 与 END 配对出现：源码里的占位提示（如表单
+#      placeholder "-----BEGIN PRIVATE KEY-----"）只有 BEGIN 半截，不算真实密钥。
 #
 # 例外（白名单，可在此扩展）：
 #   - .env.example / .env.demo / .env.sample / .env.template / .env.dist 等模板
@@ -86,9 +88,12 @@ for f in "${STAGED[@]}"; do
   # 含 NUL 的文件被视为二进制、不产生匹配，于是这里直接跳过。
   if ! printf '%s\n' "$content" | grep -qI .; then continue; fi
 
-  # PEM 私钥块：最高信号，几乎只出现在真实密钥里
+  # PEM 私钥块：最高信号，真实密钥一定 BEGIN 与 END 成对出现。
+  # 只匹配 BEGIN 会把 UI 占位提示（如 CredentialField.vue 的 placeholder）
+  # 当成私钥误报，故要求同文件里也能找到对应的 END 行。
   # 模式以 `-----` 开头，必须用 `--` 终止选项解析，否则 grep 会当成未知参数。
-  if printf '%s\n' "$content" | grep -Eq -- '-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----'; then
+  if printf '%s\n' "$content" | grep -Eq -- '-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----' \
+     && printf '%s\n' "$content" | grep -Eq -- '-----END [A-Z0-9 ]*PRIVATE KEY-----'; then
     bad+=("$f|内容含 PEM 私钥块"); continue
   fi
 

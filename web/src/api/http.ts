@@ -1,3 +1,5 @@
+import { locale, t } from '@/i18n'
+
 /**
  * HTTP 客户端。所有后端调用都走这里。
  *
@@ -11,6 +13,12 @@
 /** 后端约定的 CSRF 请求头。浏览器不允许跨源请求携带自定义头。 */
 const CSRF_HEADER = 'X-OCI-Tools'
 const CSRF_VALUE = '1'
+
+/**
+ * 界面语言。后端据此决定错误信息、任务步骤等文案用哪种语言写——
+ * 那些文字是后端生成的，前端拿到的已经是成品。
+ */
+const LANG_HEADER = 'Accept-Language'
 
 /** 401 时广播的事件名。 */
 export const AUTH_REQUIRED_EVENT = 'oci:auth-required'
@@ -44,7 +52,7 @@ export interface ApiErrorBody {
  * ApiError 保留后端给的全部错误信息。
  *
  * ociCode 是 Oracle 的原始错误码，UI 上必须原样展示且可复制——
- * 用户排障时要拿它去搜索。advice 是可直接显示的中文建议。
+ * 用户排障时要拿它去搜索。advice 是可直接显示的建议，已按界面语言写好。
  */
 export class ApiError extends Error {
   readonly status: number
@@ -53,7 +61,7 @@ export class ApiError extends Error {
   readonly advice?: string
 
   constructor(status: number, body: ApiErrorBody) {
-    super(body.message || `请求失败（HTTP ${status}）`)
+    super(body.message || t.http.failed(status))
     this.name = 'ApiError'
     this.status = status
     this.code = body.code || 'unknown'
@@ -102,19 +110,11 @@ function buildUrl(path: string, query?: RequestOptions['query']): string {
  *
  * 验证码错误或已被使用时后端会再次拒绝，带着原因重新问一次，直到成功或用户取消。
  */
-async function request<T>(method: Method, path: string, opts: RequestOptions = {}): Promise<T> {
-  return retryWithDangerCode(code => send<T>(method, path, opts, code))
-}
-
-/**
- * 危险操作的验证码重试循环。抽出来是因为三种请求形态（JSON、二进制、
- * 表单）都要用它——复制三遍迟早会有一处忘了补。
- */
-async function retryWithDangerCode<T>(attempt: (code?: string) => Promise<T>): Promise<T> {
+async function withDangerRetry<T>(op: (code: string | undefined) => Promise<T>): Promise<T> {
   let code: string | undefined
   for (;;) {
     try {
-      return await attempt(code)
+      return await op(code)
     } catch (err) {
       if (!(err instanceof ApiError) || !DANGER_CODES.has(err.code) || !dangerCodeProvider) throw err
       const next = await dangerCodeProvider(err.message)
@@ -124,60 +124,64 @@ async function retryWithDangerCode<T>(attempt: (code?: string) => Promise<T>): P
   }
 }
 
-/** 统一的请求头构造。三种请求形态共用。 */
-function buildHeaders(method: Method, opts: RequestOptions, dangerCode?: string): Record<string, string> {
-  const headers: Record<string, string> = { Accept: 'application/json' }
+function request<T>(method: Method, path: string, opts: RequestOptions = {}): Promise<T> {
+  return withDangerRetry(code => send<T>(method, path, opts, code))
+}
+
+/**
+ * 序列化请求体。FormData 不能走 JSON.stringify —— 那样会把 multipart 边界丢掉，
+ * 后端解析不出文件。交给浏览器自己给 FormData 设置 Content-Type。
+ */
+function serializeBody(opts: RequestOptions): { body?: BodyInit; json: boolean } {
+  if (opts.body === undefined) return { json: false }
+  if (opts.body instanceof FormData) return { body: opts.body, json: false }
+  return { body: JSON.stringify(opts.body), json: true }
+}
+
+/** 发请求拿原始响应。header / CSRF / 401 广播 / 错误转换都集中在这里。 */
+async function fire(method: Method, path: string, opts: RequestOptions,
+                    dangerCode: string | undefined,
+                    payload: ReturnType<typeof serializeBody>): Promise<Response> {
+  const headers: Record<string, string> = { Accept: 'application/json', [LANG_HEADER]: locale.value }
   if (dangerCode) headers[DANGER_CODE_HEADER] = dangerCode
+
+  // 读操作不需要 CSRF 头，带上也无害，但保持与后端约定一致更清楚。
   if (method !== 'GET') {
     headers[CSRF_HEADER] = CSRF_VALUE
-    // 表单的 Content-Type 由浏览器带 boundary 生成，这里不能覆盖。
-    if (opts.body !== undefined && !(opts.body instanceof FormData)) {
-      headers['Content-Type'] = 'application/json'
-    }
+    if (payload.json) headers['Content-Type'] = 'application/json'
   }
-  return headers
-}
 
-/** 把非 2xx 的响应转成 ApiError。401 顺带广播一次。 */
-async function toApiError(response: Response): Promise<ApiError> {
-  const text = await response.text()
-  let payload: unknown
+  let response: Response
   try {
-    payload = text ? JSON.parse(text) : undefined
-  } catch {
-    payload = undefined
-  }
-  const body = (payload ?? {}) as ApiErrorBody
-  if (response.status === 401) {
-    window.dispatchEvent(new CustomEvent(AUTH_REQUIRED_EVENT, {
-      detail: { code: body.code ?? 'unauthenticated' }
-    }))
-  }
-  return new ApiError(response.status, body)
-}
-
-/** 发一次请求，返回原始 Response。网络层失败转成 ApiError(0)。 */
-async function fire(method: Method, path: string, opts: RequestOptions,
-                    dangerCode: string | undefined, body: BodyInit | undefined): Promise<Response> {
-  try {
-    return await fetch(buildUrl(path, opts.query), {
+    response = await fetch(buildUrl(path, opts.query), {
       method,
-      headers: buildHeaders(method, opts, dangerCode),
+      headers,
       credentials: 'same-origin',
-      body,
+      body: payload.body,
       signal: opts.signal
     })
   } catch (err) {
     // 网络层失败没有状态码。用 0 表示，让上层能与业务错误区分开。
     if ((err as Error)?.name === 'AbortError') throw err
-    throw new ApiError(0, { code: 'network', message: '无法连接到服务，请检查网络或后端是否在运行' })
+    throw new ApiError(0, { code: 'network', message: t.http.network })
   }
-}
 
-function jsonBody(opts: RequestOptions): BodyInit | undefined {
-  if (opts.body === undefined) return undefined
-  if (opts.body instanceof FormData) return opts.body
-  return JSON.stringify(opts.body)
+  if (!response.ok) {
+    const text = await response.text()
+    let parsed: unknown = undefined
+    if (text) {
+      try { parsed = JSON.parse(text) } catch { /* 非 JSON 错误体，按空体处理 */ }
+    }
+    const body = (parsed ?? {}) as ApiErrorBody
+    if (response.status === 401) {
+      // 广播而不是直接跳转：路由不该被 HTTP 层硬编码。
+      window.dispatchEvent(new CustomEvent(AUTH_REQUIRED_EVENT, {
+        detail: { code: body.code ?? 'unauthenticated' }
+      }))
+    }
+    throw new ApiError(response.status, body)
+  }
+  return response
 }
 
 async function send<T>(method: Method, path: string, opts: RequestOptions, dangerCode?: string): Promise<T> {
@@ -188,40 +192,27 @@ async function send<T>(method: Method, path: string, opts: RequestOptions, dange
     return demoSend<T>(method, path, opts.query, opts.body)
   }
 
-  const response = await fire(method, path, opts, dangerCode, jsonBody(opts))
+  const response = await fire(method, path, opts, dangerCode, serializeBody(opts))
   if (response.status === 204) return undefined as T
-  if (!response.ok) throw await toApiError(response)
-
   const text = await response.text()
-  let payload: unknown = undefined
-  if (text) {
-    try {
-      payload = JSON.parse(text)
-    } catch {
-      payload = undefined
-    }
-  }
-  return payload as T
+  if (!text) return undefined as T
+  try { return JSON.parse(text) as T } catch { return undefined as T }
 }
 
 /**
  * 二进制响应（备份导出、审计 CSV）。
  *
- * 不能走 send：它会把响应体当 JSON 解析，而备份是密文、审计是 CSV，
- * JSON.parse 失败后返回 undefined——用户会拿到一个「成功但没有内容」
- * 的结果，然后以为备份是空的。
+ * 不能走 send：它把响应体当 JSON 解析，而备份是密文、审计是 CSV，
+ * JSON.parse 失败后返回 undefined——用户会拿到「成功但没有内容」的结果，
+ * 然后以为备份是空的。
  */
 async function sendBlob(method: Method, path: string, opts: RequestOptions,
                         dangerCode?: string): Promise<Blob> {
-  // 演示站（GitHub Pages）没有后端，导出交给浏览器里的模拟实现。
-  // 与 send 同一个判断：VITE_DEMO 在构建时被替换成常量，正常构建整段被摇掉。
   if (import.meta.env.VITE_DEMO === 'true') {
     const { demoSend } = await import('@/demo/server')
     return demoSend<Blob>(method, path, opts.query, opts.body)
   }
-
-  const response = await fire(method, path, opts, dangerCode, jsonBody(opts))
-  if (!response.ok) throw await toApiError(response)
+  const response = await fire(method, path, opts, dangerCode, serializeBody(opts))
   return response.blob()
 }
 
@@ -237,18 +228,17 @@ export const http = {
 
   /** 下载二进制。备份导出用 */
   postBlob: (path: string, body?: unknown, opts?: RequestOptions) =>
-    retryWithDangerCode(code => sendBlob('POST', path, { ...opts, body }, code)),
+    withDangerRetry(code => sendBlob('POST', path, { ...opts, body }, code)),
 
   /**
    * 下载二进制（GET）。审计导出用。
-   *
    * 不用复核验证码：导出是只读操作，后端不会走 danger 那一套。
    */
   getBlob: (path: string, opts?: RequestOptions) => sendBlob('GET', path, opts ?? {}),
 
   /** 上传表单。恢复备份用 */
   postForm: <T>(path: string, form: FormData, opts?: RequestOptions) =>
-    retryWithDangerCode(code => send<T>('POST', path, { ...opts, body: form }, code))
+    withDangerRetry(code => send<T>('POST', path, { ...opts, body: form }, code))
 }
 
 /** 把任意异常转成可显示的一行文本。 */

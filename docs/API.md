@@ -22,6 +22,18 @@ X-OCI-Tools: 1
 
 读操作不需要该头。
 
+### 语言
+
+接口返回给人看的文字（`message`、`advice`、`notice`、任务标题与步骤、预设与模板说明等）按请求语言输出，目前支持 `zh-CN` 与 `en`：
+
+- 普通请求读 `Accept-Language` 请求头，按顺序取第一个 `zh*` 或 `en*` 标签，都没有时用中文；
+- SSE（`EventSource` 不能带自定义头）用查询参数 `?lang=en`；
+- 后台任务记住提交时的语言，之后读取任务详情时按读取方的语言重新渲染；
+- 写进 Oracle 的描述（路由规则、安全规则的 description）在提交时就按请求语言定稿；
+- 通知与服务端日志不对应某个请求，使用设置项 `language`。
+
+`code`、`ociCode` 以及 Oracle 原样返回的错误正文不翻译。
+
 ### 错误格式
 
 ```json
@@ -33,7 +45,7 @@ X-OCI-Tools: 1
 }
 ```
 
-`ociCode` 是 Oracle 的原始错误码，**必须原样展示且可复制**——用户要拿它去搜索。`advice` 是可直接显示给用户的中文建议。
+`ociCode` 是 Oracle 的原始错误码，**必须原样展示且可复制**——用户要拿它去搜索。`advice` 是可直接显示给用户的建议，语言见上文「语言」。
 
 常见 `code`：
 
@@ -173,8 +185,10 @@ X-OCI-Tools: 1
 | PATCH | `/api/instances/{ocid}` | 改名 |
 | POST | `/api/instances/{ocid}/reshape` | 改配置（运行中会由 Oracle 重启一次） |
 | DELETE | `/api/instances/{ocid}?confirm={name}` | 终止，**需回传实例名** |
+| POST | `/api/instances/{ocid}/replace-boot-volume` | 用镜像替换引导卷（重装系统），**需回传实例名** |
 | POST | `/api/instances/{ocid}/dismiss-error` | 清除该行的错误提示 |
-| POST | `/api/instances/{ocid}/change-ip?confirm=true` | 更换公网 IP |
+| POST | `/api/instances/{ocid}/change-ip?confirm=true&vnicId=` | 更换公网 IP；`vnicId` 留空为主网卡，网卡没有公网 IP 时即分配一个 |
+| POST | `/api/instances/{ocid}/vnics/{vnicId}/ipv6` | 给指定网卡再分配一个 IPv6（已有地址也照样新分配，后台任务） |
 | POST | `/api/instances/{ocid}/enable-ipv6` | 启用 IPv6 |
 | DELETE | `/api/instances/{ocid}/ipv6?address=&confirm=true` | 移除网卡上的一个 IPv6 地址（后台任务） |
 | POST | `/api/instances/{ocid}/vnics` | 添加附属网卡 |
@@ -230,6 +244,12 @@ X-OCI-Tools: 1
 **`POST /api/instances/{ocid}/reshape`** — `{ "ocpus": 2, "memoryInGbs": 12, "baselineOcpuUtilization": "" }`
 
 不要求先关机：运行中的实例由 Oracle 重启一次来应用变更；处于过渡态时返回 409 `instance_busy`。通过后返回 202 与任务（`instance.reshape`），运行中的实例会一直等到重启落定。OCPU/内存搭配与突发基线按规格元数据实时校验（A1.Flex 每 OCPU 最多 6 GB）。`baselineOcpuUtilization` 留空表示不改突发设置，改回独占传 `BASELINE_1_1`。
+
+**网卡上的地址**：`vnicId` 必须是挂在该实例上、状态 `ATTACHED` 的网卡，否则任务失败——网卡 OCID 来自客户端，不校验就能改到别的实例。实例详情里每张网卡的 `ipv6Info` 与 `ipv6` 一一对应，按创建时间升序，多带 `timeCreated`。添加 IPv6 时子网、VCN 没开通会一并开通（VCN 开通后关不掉），与 `enable-ipv6` 一样走危险操作复核；`enable-ipv6` 仍保留，语义是「确保主网卡有一个」，重复调用不新增地址。
+
+**`POST /api/instances/{ocid}/replace-boot-volume`** — `{ "imageId": "ocid1.image…", "bootVolumeGb": 100, "preserveBootVolume": true, "sshPublicKey": "", "cloudInit": "", "confirm": "实例名" }`
+
+对应 Oracle 的 Replace boot volume：实例、OCID 与 A1 容量保留，只换系统盘。L3 危险操作，`confirm` 必须等于实例名，否则返回 `confirm_required`；过渡态返回 409 `instance_busy`（卡在关机中的机器要先强制关机）。`bootVolumeGb` 为 0 时按镜像默认大小，非 0 时至少 50。`sshPublicKey` / `cloudInit` 留空则沿用实例原有元数据，非空时合并进去。`preserveBootVolume` 为 true 时旧盘保留并继续占用块存储额度。通过后返回 202 与任务（`instance.replace_boot_volume`），运行中的实例会一直等到重新开机，结束后以 Oracle 为准重读新引导卷。
 
 **`GET /api/instances/{ocid}/metrics`** — `?hours=6&metrics=CpuUtilization,NetworksBytesIn`
 
@@ -773,8 +793,10 @@ Allow group <你的组> to read usage-report in tenancy
 ```json
 { "allowTerminate": true, "allowBulkActions": true,
   "requireTotpForDanger": false, "syncIntervalMinutes": 5,
-  "checkIntervalHours": 6 }
+  "checkIntervalHours": 6, "language": "zh-CN" }
 ```
+
+`language` 是通知与后台日志使用的语言（`zh-CN` / `en`），不影响界面——界面语言由各浏览器自己记住。
 
 `allowTerminate: false` 时终止接口直接返回 403 —— **服务端强制，前端按钮可以被绕过**。
 

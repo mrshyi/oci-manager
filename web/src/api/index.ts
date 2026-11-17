@@ -248,6 +248,17 @@ export const instances = {
     http.post<D.JobAcceptedDTO>(`/api/instances/${encodeURIComponent(id)}/reshape`,
       { ocpus, memoryInGbs, baselineOcpuUtilization }),
 
+  /** 用镜像替换引导卷（重装系统）。confirm 必须等于实例名。 */
+  replaceBootVolume: (id: string, body: {
+    imageId: string
+    bootVolumeGb?: number
+    preserveBootVolume: boolean
+    sshPublicKey?: string
+    cloudInit?: string
+    confirm: string
+  }) =>
+    http.post<D.JobAcceptedDTO>(`/api/instances/${encodeURIComponent(id)}/replace-boot-volume`, body),
+
   /** 终止需回传实例名。preserveBootVolume 决定引导卷是否保留。 */
   terminate: (id: string, confirmName: string, preserveBootVolume = false) =>
     http.del<D.JobAcceptedDTO>(`/api/instances/${encodeURIComponent(id)}`, {
@@ -261,10 +272,16 @@ export const instances = {
     http.post<{ ok: boolean }>(`/api/instances/${encodeURIComponent(id)}/dismiss-error`),
 
   /** 后台任务，结果（D.ChangeIpDTO）在任务的 result 里 */
-  changeIp: (id: string) =>
+  /** vnicId 留空为主网卡；网卡还没有公网 IP 时就是新分配一个 */
+  changeIp: (id: string, vnicId?: string) =>
     http.post<D.JobAcceptedDTO>(`/api/instances/${encodeURIComponent(id)}/change-ip`, undefined, {
-      query: { confirm: 'true' }
+      query: { confirm: 'true', vnicId }
     }),
+
+  /** 给指定网卡再分配一个 IPv6，已有地址也照样新分配。结果（D.EnableIpv6DTO）在任务里 */
+  addIpv6: (id: string, vnicId: string) =>
+    http.post<D.JobAcceptedDTO>(
+      `/api/instances/${encodeURIComponent(id)}/vnics/${encodeURIComponent(vnicId)}/ipv6`),
 
   /** 删除实例网卡上的一个 IPv6 地址，后台任务 */
   removeIpv6: (id: string, address: string) =>

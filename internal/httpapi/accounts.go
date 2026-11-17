@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"ocicore/internal/accountsvc"
+	"ocicore/internal/i18n"
 	"ocicore/internal/ociclient"
 	"ocicore/internal/proxypool"
 	"ocicore/internal/store"
@@ -161,7 +162,7 @@ func (s *Server) handleUpdateAccount(w http.ResponseWriter, r *http.Request) {
 	// 空字符串的私钥是误传，不是"清空私钥"——没有私钥的账号毫无意义。
 	if req.PrivateKeyPem != nil && strings.TrimSpace(*req.PrivateKeyPem) == "" {
 		writeError(w, http.StatusBadRequest, "empty_key",
-			"私钥不能为空。若不想修改私钥，请不要提交该字段。")
+			i18n.M("api.empty_key"))
 		return
 	}
 	// 启停账号与轮换密钥对应前端的 L2 确认；改别名、颜色之类不算。
@@ -217,7 +218,7 @@ func (s *Server) handleDeleteAccount(w http.ResponseWriter, r *http.Request) {
 	confirm := strings.TrimSpace(r.URL.Query().Get("confirm"))
 	if confirm != acc.Alias {
 		writeError(w, http.StatusBadRequest, "confirm_required",
-			"删除账号需要在 confirm 参数中回传账号别名 "+strconv.Quote(acc.Alias))
+			i18n.M("api.account_confirm", acc.Alias))
 		return
 	}
 
@@ -245,7 +246,7 @@ func (s *Server) handleCheckAccount(w http.ResponseWriter, r *http.Request) {
 	}
 	result := s.checkAccount(r.Context(), acc)
 	if result == nil {
-		writeError(w, http.StatusInternalServerError, "internal", "校验失败")
+		writeError(w, http.StatusInternalServerError, "internal", i18n.M("api.check_failed"))
 		return
 	}
 	writeJSON(w, http.StatusOK, result)
@@ -263,7 +264,7 @@ func (s *Server) checkAccount(ctx context.Context, acc *store.Account) *accounts
 			ErrorClass:   ociclient.ClassAuthFailed.String(),
 			AccountFatal: true,
 			Steps: []accountsvc.Step{
-				{Key: "credentials", Label: "读取凭据", OK: false, Detail: msg},
+				{Key: "credentials", Label: i18n.M("api.step.read_creds"), OK: false, Detail: msg},
 			},
 		}
 		// 本地私钥读不出来与 OCI 返回 401 是两回事，但对"这份凭据还能不能
@@ -342,7 +343,7 @@ func (s *Server) handleParseConfig(w http.ResponseWriter, r *http.Request) {
 	profiles := ociclient.ParseConfigFile(req.Text)
 	if len(profiles) == 0 {
 		writeError(w, http.StatusBadRequest, "parse_failed",
-			"没有识别出任何配置项。请粘贴 Oracle 控制台生成的完整配置片段。")
+			i18n.M("api.config_parse_failed"))
 		return
 	}
 
@@ -400,7 +401,7 @@ func (s *Server) handleCheckDraft(w http.ResponseWriter, r *http.Request) {
 	if req.ProxyID != "" {
 		u, err := s.st.ProxyURL(r.Context(), req.ProxyID)
 		if err != nil {
-			writeError(w, http.StatusBadRequest, "invalid_proxy", "所选代理不可用："+err.Error())
+			writeError(w, http.StatusBadRequest, "invalid_proxy", i18n.M("api.proxy_unusable", err.Error()))
 			return
 		}
 		req.ProxyUrl = u
@@ -463,13 +464,14 @@ func (s *Server) handleExportAudit(w http.ResponseWriter, r *http.Request) {
 	cw := csv.NewWriter(w)
 	// UTF-8 BOM：Excel 不认无 BOM 的 UTF-8，中文会显示成乱码。
 	_, _ = w.Write([]byte{0xEF, 0xBB, 0xBF})
-	_ = cw.Write([]string{"时间", "动作", "账号", "目标资源", "详情", "来源 IP", "结果"})
+	lang := langOf(w)
+	_ = cw.Write([]string{i18n.T(lang, "csv.time"), i18n.T(lang, "csv.action"), i18n.T(lang, "csv.account"), i18n.T(lang, "csv.target"), i18n.T(lang, "csv.detail"), i18n.T(lang, "csv.ip"), i18n.T(lang, "csv.result")})
 
 	err := s.st.EachAudit(r.Context(), filter, func(e store.AuditEntry) error {
 		return cw.Write([]string{
 			e.CreatedAt.Format("2006-01-02 15:04:05"),
-			csvCell(e.Action), csvCell(e.AccountID), csvCell(e.Target),
-			csvCell(e.Detail), csvCell(e.IP), csvCell(e.Result),
+			csvCell(e.Action), csvCell(e.AccountID), csvCell(i18n.Render(lang, e.Target)),
+			csvCell(i18n.Render(lang, e.Detail)), csvCell(e.IP), csvCell(e.Result),
 		})
 	})
 	cw.Flush()

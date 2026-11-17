@@ -1,10 +1,33 @@
 package ociclient
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
+
+	"ocicore/internal/i18n"
 )
+
+// 替换引导卷时「不保留旧盘」必须真的发出 false：omitempty 会把普通 bool 的 false
+// 吞掉，Oracle 就按默认值保留旧盘，用户以为删了的卷还在扣块存储额度。
+func TestUpdateInstanceSourceDetailsJSON(t *testing.T) {
+	no := false
+	raw, err := json.Marshal(UpdateInstanceRequest{
+		SourceDetails: &UpdateInstanceSourceDetails{
+			SourceType: SourceTypeImage, ImageID: "img-1", BootVolumeSizeInGBs: 100,
+			IsPreserveBootVolumeEnabled: &no,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(raw)
+	want := `{"sourceDetails":{"sourceType":"image","imageId":"img-1","bootVolumeSizeInGBs":100,"isPreserveBootVolumeEnabled":false}}`
+	if got != want {
+		t.Fatalf("请求体 = %s\n期望      %s", got, want)
+	}
+}
 
 // 稳定态与过渡态的划分是整个 UI 动效语义的基础：
 // 只有过渡态带脉冲动画，判错了动效就失去意义。
@@ -82,7 +105,7 @@ func TestValidateShapeConfigRejectsOverLimits(t *testing.T) {
 			if err == nil {
 				t.Fatalf("配置 %+v 应当被拒绝", tc.cfg)
 			}
-			if !strings.Contains(err.Error(), tc.want) {
+			if !strings.Contains(i18n.Message(i18n.ZH, err), tc.want) {
 				t.Errorf("错误信息应提到 %q，实际为: %v", tc.want, err)
 			}
 		})
@@ -114,7 +137,7 @@ func TestValidateVolumeResize(t *testing.T) {
 	if err == nil {
 		t.Fatal("缩容应当被拒绝")
 	}
-	if !strings.Contains(err.Error(), "缩容") {
+	if !strings.Contains(i18n.Message(i18n.ZH, err), "缩容") {
 		t.Errorf("错误信息应说明不支持缩容: %v", err)
 	}
 

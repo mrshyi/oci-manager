@@ -1,0 +1,1 @@
+import{d as n,c as s,n as o,a as t,p as r,_ as c}from"./index-BdLbqkbl.js";const i=n({__name:"LoadingBar",props:{active:{type:Boolean}},setup(e){return(l,a)=>(r(),s("div",{class:o(["lbar",{"is-on":e.active}]),"aria-hidden":"true"},[...a[0]||(a[0]=[t("span",null,null,-1)])],2))}}),d=c(i,[["__scopeId","data-v-d3f37eab"]]);export{d as L};

@@ -19,6 +19,7 @@ import (
 	"ocicore/internal/cryptobox"
 	"ocicore/internal/geoip"
 	"ocicore/internal/httpapi"
+	"ocicore/internal/i18n"
 	"ocicore/internal/instancesvc"
 	"ocicore/internal/logstream"
 	"ocicore/internal/ociconn"
@@ -46,7 +47,23 @@ func main() {
 	// 行为（虽然两者都被采集），而加一个缓冲不该顺带改动别的。
 	logs := logstream.NewRing(logstream.DefaultCapacity)
 	slog.SetDefault(slog.New(logstream.NewHandler(
-		slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}),
+		slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
+			Level: slog.LevelInfo,
+			// 错误信息里可能带消息信封（见 internal/i18n），日志里按默认语言展开成可读文字。
+			ReplaceAttr: func(_ []string, a slog.Attr) slog.Attr {
+				switch v := a.Value.Any(). (type) {
+				case string:
+					if i18n.Contains(v) {
+						return slog.String(a.Key, i18n.Render(i18n.Default, v))
+					}
+				case error:
+					if i18n.Contains(v.Error()) {
+						return slog.String(a.Key, i18n.Message(i18n.Default, v))
+					}
+				}
+				return a
+			},
+		}),
 		logs,
 	)))
 

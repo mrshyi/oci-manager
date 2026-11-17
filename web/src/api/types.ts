@@ -317,6 +317,8 @@ export interface VnicInfoDTO {
   publicIpType?: string
   privateIpId?: string
   ipv6: string[] | null
+  /** 与 ipv6 一一对应，多带创建时间（旧后端没有这个字段） */
+  ipv6Info?: { address: string; timeCreated?: string }[] | null
   macAddress: string
   subnetId: string
   subnetName?: string
@@ -435,6 +437,8 @@ export interface SettingsDTO {
   checkIntervalHours: number
   /** 审计日志保留天数，0 为永久保留 */
   auditRetentionDays: number
+  /** 通知与后台任务文案的语言（zh-CN / en）。旧后端没有这个字段 */
+  language?: string
 }
 
 export interface ChannelDTO {
